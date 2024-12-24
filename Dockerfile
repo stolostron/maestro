@@ -5,7 +5,7 @@ WORKDIR $SOURCE_DIR
 COPY . $SOURCE_DIR
 
 ENV GOFLAGS=""
-RUN make binary
+RUN make binary BUILD_OPTS="-tags kafka"
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
