@@ -46,7 +46,7 @@ require (
 	gopkg.in/resty.v1 v1.12.0
 	gorm.io/datatypes v1.2.0
 	gorm.io/driver/postgres v1.5.0
-	gorm.io/gorm v1.24.7-0.20230306060331-85eaf9eeda11
+	gorm.io/gorm v1.25.7
 	k8s.io/api v0.31.3
 	k8s.io/apimachinery v0.31.3
 	k8s.io/apiserver v0.31.3
@@ -163,7 +163,7 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	gorm.io/driver/mysql v1.4.7 // indirect
+	gorm.io/driver/mysql v1.5.7 // indirect
 	k8s.io/apiextensions-apiserver v0.31.3 // indirect
 	k8s.io/kms v0.31.3 // indirect
 	k8s.io/kube-aggregator v0.31.3 // indirect
