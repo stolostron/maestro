@@ -32,7 +32,7 @@ import (
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/store"
 
 	"github.com/bxcodec/faker/v3"
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/segmentio/ksuid"
 	"github.com/spf13/pflag"
