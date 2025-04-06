@@ -43,7 +43,7 @@ require (
 	golang.org/x/oauth2 v0.21.0
 	google.golang.org/grpc v1.65.0
 	google.golang.org/protobuf v1.35.1
-	gopkg.in/resty.v1 v1.12.0
+	gopkg.in/resty.v2 v2.16.5
 	gorm.io/datatypes v1.2.0
 	gorm.io/driver/postgres v1.5.0
 	gorm.io/gorm v1.24.7-0.20230306060331-85eaf9eeda11
