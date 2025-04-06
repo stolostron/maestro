@@ -12,7 +12,7 @@ require (
 	github.com/bxcodec/faker/v3 v3.2.0
 	github.com/cespare/xxhash v1.1.0
 	github.com/cloudevents/sdk-go/v2 v2.15.3-0.20240911135016-682f3a9684e4
-	github.com/deckarep/golang-set/v2 v2.6.0
+	github.com/deckarep/golang-set/v2 v2.8.0
 	github.com/evanphx/json-patch v5.9.0+incompatible
 	github.com/getsentry/sentry-go v0.20.0
 	github.com/ghodss/yaml v1.0.0
