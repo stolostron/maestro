@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/buraksezer/consistent"
-	"github.com/cespare/xxhash"
+	"github.com/cespare/xxhash/v2"
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/openshift-online/maestro/pkg/api"
 	"github.com/openshift-online/maestro/pkg/client/cloudevents"
