@@ -121,7 +121,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/openshift/api v0.0.0-20241001152557-e415140e5d5f // indirect
-	github.com/openshift/client-go v0.0.0-20241001162912-da6d55e4611f // indirect
+	github.com/openshift/client-go 900624865677 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pkg/profile v1.7.0 // indirect
