@@ -6,7 +6,8 @@ COPY . $SOURCE_DIR
 
 ENV GOEXPERIMENT=strictfipsruntime
 ENV CGO_ENABLED=1
-RUN make binary BUILD_OPTS="-tags strictfipsruntime"
+# Note: kafka tag is required
+RUN make binary BUILD_OPTS="-tags strictfipsruntime,kafka"
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 

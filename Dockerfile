@@ -1,11 +1,11 @@
-FROM golang:1.23 AS builder
+FROM registry.ci.openshift.org/stolostron/builder:go1.23-linux AS builder
 
 ENV SOURCE_DIR=/maestro
 WORKDIR $SOURCE_DIR
 COPY . $SOURCE_DIR
 
 ENV GOFLAGS=""
-RUN make binary
+RUN make binary BUILD_OPTS="-tags kafka"
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
