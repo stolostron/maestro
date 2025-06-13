@@ -10,16 +10,13 @@ import (
 	"github.com/openshift-online/maestro/pkg/db"
 	"github.com/openshift-online/maestro/pkg/dispatcher"
 	"github.com/openshift-online/maestro/pkg/event"
-	"github.com/openshift-online/maestro/pkg/logger"
 	"github.com/openshift-online/maestro/pkg/services"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/common"
+	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/payload"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/source/codec"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/common"
-	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/work/payload"
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/source/codec"
 )
-
-var log = logger.NewOCMLogger(context.Background())
 
 // EventServer handles resource-related events:
 // 1. Resource spec events (create, update and delete) from the resource controller.
@@ -39,6 +36,9 @@ type EventServer interface {
 
 	// OnStatusUpdate handles status update events for a resource.
 	OnStatusUpdate(ctx context.Context, eventID, resourceID string) error
+
+	// returns true if the event should be processed by the current instance, otherwise false and an error if it occurs.
+	PredicateEvent(ctx context.Context, eventID string) (bool, error)
 }
 
 var _ EventServer = &MessageQueueEventServer{}
@@ -91,13 +91,13 @@ func (s *MessageQueueEventServer) Start(ctx context.Context) {
 // It runs asynchronously in the background until the provided context is canceled.
 func (s *MessageQueueEventServer) startSubscription(ctx context.Context) {
 	s.sourceClient.Subscribe(ctx, func(action types.ResourceAction, resource *api.Resource) error {
-		log.V(4).Infof("received action %s for resource %s", action, resource.ID)
+		log.Infof("received action %s for resource %s", action, resource.ID)
 
 		switch action {
 		case types.StatusModified:
 			if !s.statusDispatcher.Dispatch(resource.ConsumerName) {
 				// the resource is not owned by the current instance, skip
-				log.V(4).Infof("skipping resource status update %s as it is not owned by the current instance", resource.ID)
+				log.Infof("skipping resource status update %s as it is not owned by the current instance", resource.ID)
 				return nil
 			}
 
@@ -106,7 +106,7 @@ func (s *MessageQueueEventServer) startSubscription(ctx context.Context) {
 				return fmt.Errorf("failed to handle resource status update %s: %s", resource.ID, err.Error())
 			}
 		default:
-			return fmt.Errorf("unsupported action %s", action)
+			return fmt.Errorf("failed to handle resource status update %s: unsupported action %s", resource.ID, action)
 		}
 
 		return nil
@@ -145,6 +145,11 @@ func (s *MessageQueueEventServer) OnStatusUpdate(ctx context.Context, eventID, r
 	)
 }
 
+// EventPredicate for the message queue event server is no-op, as the message queue server filter event based on advisory lock.
+func (s *MessageQueueEventServer) PredicateEvent(ctx context.Context, eventID string) (bool, error) {
+	return true, nil
+}
+
 // handleStatusUpdate processes the resource status update from the agent.
 // The resource argument contains the updated status.
 // The function performs the following steps:
@@ -153,10 +158,12 @@ func (s *MessageQueueEventServer) OnStatusUpdate(ctx context.Context, eventID, r
 // 3. Checks if the resource has been deleted from the agent. If so, creates a status event and deletes the resource from Maestro;
 // otherwise, updates the resource status and creates a status event.
 func handleStatusUpdate(ctx context.Context, resource *api.Resource, resourceService services.ResourceService, statusEventService services.StatusEventService) error {
+	log.Infof("handle resource status update %s by the current instance", resource.ID)
+
 	found, svcErr := resourceService.Get(ctx, resource.ID)
 	if svcErr != nil {
 		if svcErr.Is404() {
-			log.Warning(fmt.Sprintf("skipping resource %s as it is not found", resource.ID))
+			log.Warnf("skipping resource %s as it is not found", resource.ID)
 			return nil
 		}
 
@@ -169,7 +176,6 @@ func handleStatusUpdate(ctx context.Context, resource *api.Resource, resourceSer
 
 	// set the resource source and type back for broadcast
 	resource.Source = found.Source
-	resource.Type = found.Type
 
 	// convert the resource status to cloudevent
 	statusEvent, err := api.JSONMAPToCloudEvent(resource.Status)
@@ -195,13 +201,13 @@ func handleStatusUpdate(ctx context.Context, resource *api.Resource, resourceSer
 	}
 
 	// decode the cloudevent data as manifest status
-	statusPayload := &workpayload.ManifestStatus{}
+	statusPayload := &workpayload.ManifestBundleStatus{}
 	if err := statusEvent.DataAs(statusPayload); err != nil {
 		return fmt.Errorf("failed to decode cloudevent data as resource status: %v", err)
 	}
 
 	// if the resource has been deleted from agent, create status event and delete it from maestro
-	if meta.IsStatusConditionTrue(statusPayload.Conditions, common.ManifestsDeleted) {
+	if meta.IsStatusConditionTrue(statusPayload.Conditions, common.ResourceDeleted) {
 		_, sErr := statusEventService.Create(ctx, &api.StatusEvent{
 			ResourceID:      resource.ID,
 			ResourceSource:  resource.Source,
@@ -216,6 +222,8 @@ func handleStatusUpdate(ctx context.Context, resource *api.Resource, resourceSer
 		if svcErr := resourceService.Delete(ctx, resource.ID); svcErr != nil {
 			return fmt.Errorf("failed to delete resource %s: %s", resource.ID, svcErr.Error())
 		}
+
+		log.Infof("resource %s status delete event was sent", resource.ID)
 	} else {
 		// update the resource status
 		_, updated, svcErr := resourceService.UpdateStatus(ctx, resource)
@@ -232,6 +240,8 @@ func handleStatusUpdate(ctx context.Context, resource *api.Resource, resourceSer
 			if sErr != nil {
 				return fmt.Errorf("failed to create status event for resource status update %s: %s", resource.ID, sErr.Error())
 			}
+
+			log.Infof("resource %s status update event was sent", resource.ID)
 		}
 	}
 
@@ -265,12 +275,17 @@ func broadcastStatusEvent(ctx context.Context,
 	} else {
 		resource, sErr = resourceService.Get(ctx, resourceID)
 		if sErr != nil {
+			if sErr.Is404() {
+				log.Infof("skipping resource %s as it is not found", resourceID)
+				return nil
+			}
+
 			return fmt.Errorf("failed to get resource %s: %s", resourceID, sErr.Error())
 		}
 	}
 
 	// broadcast the resource status to subscribers
-	log.V(4).Infof("Broadcast the resource status %s", resource.ID)
+	log.Infof("Broadcast the resource status, id=%s, statusEventType=%s", resource.ID, statusEvent.StatusEventType)
 	eventBroadcaster.Broadcast(resource)
 
 	// add the event instance record

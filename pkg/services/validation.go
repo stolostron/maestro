@@ -40,33 +40,18 @@ func ValidateConsumer(consumer *api.Consumer) error {
 	return fmt.Errorf(errs.ToAggregate().Error())
 }
 
-func ValidateManifest(resType api.ResourceType, manifest datatypes.JSONMap) error {
-	switch resType {
-	case api.ResourceTypeSingle:
-		// TODO: validate the deleteOption and updateStrategy
-		obj, _, _, err := api.DecodeManifest(manifest)
-		if err != nil {
-			return fmt.Errorf("failed to decode manifest: %v", err)
+func ValidateManifestBundle(manifestBundle datatypes.JSONMap) error {
+	manifestBundleWrapper, err := api.DecodeManifestBundle(manifestBundle)
+	if err != nil {
+		return fmt.Errorf("failed to decode manifest bundle: %v", err)
+	}
+	if manifestBundleWrapper == nil {
+		return fmt.Errorf("manifest bundle is empty")
+	}
+	for _, obj := range manifestBundleWrapper.Manifests {
+		if err := ValidateObject(obj); err != nil {
+			return err
 		}
-		if len(obj) == 0 {
-			return fmt.Errorf("manifest is empty")
-		}
-		return ValidateObject(obj)
-	case api.ResourceTypeBundle:
-		objs, err := api.DecodeManifestBundleToObjects(manifest)
-		if err != nil {
-			return fmt.Errorf("failed to decode manifest bundle: %v", err)
-		}
-		if len(objs) == 0 {
-			return fmt.Errorf("manifest bundle is empty")
-		}
-		for _, obj := range objs {
-			if err := ValidateObject(obj); err != nil {
-				return err
-			}
-		}
-	default:
-		return fmt.Errorf("unknown resource type: %s", resType)
 	}
 
 	return nil
@@ -102,43 +87,28 @@ func ValidateObject(obj datatypes.JSONMap) error {
 	return fmt.Errorf(errs.ToAggregate().Error())
 }
 
-func ValidateManifestUpdate(resType api.ResourceType, new, old datatypes.JSONMap) error {
-	switch resType {
-	case api.ResourceTypeSingle:
-		newObj, _, _, err := api.DecodeManifest(new)
-		if err != nil {
-			return fmt.Errorf("failed to decode new manifest: %v", err)
+func ValidateManifestBundleUpdate(new, old datatypes.JSONMap) error {
+	newManifestBundleWrapper, err := api.DecodeManifestBundle(new)
+	if err != nil {
+		return fmt.Errorf("failed to decode new manifest bundle: %v", err)
+	}
+	if newManifestBundleWrapper == nil {
+		return fmt.Errorf("new manifest bundle is empty")
+	}
+	oldManifestBundleWrapper, err := api.DecodeManifestBundle(old)
+	if err != nil {
+		return fmt.Errorf("failed to decode old manifest bundle: %v", err)
+	}
+	if oldManifestBundleWrapper == nil {
+		return fmt.Errorf("old manifest bundle is empty")
+	}
+	if len(newManifestBundleWrapper.Manifests) != len(oldManifestBundleWrapper.Manifests) {
+		return fmt.Errorf("new and old manifest have different number of objects")
+	}
+	for i := range newManifestBundleWrapper.Manifests {
+		if err := ValidateObjectUpdate(newManifestBundleWrapper.Manifests[i], oldManifestBundleWrapper.Manifests[i]); err != nil {
+			return err
 		}
-		oldObj, _, _, err := api.DecodeManifest(old)
-		if err != nil {
-			return fmt.Errorf("failed to decode old manifest: %v", err)
-		}
-		if len(newObj) == 0 || len(oldObj) == 0 {
-			return fmt.Errorf("new or old manifest is empty")
-		}
-		return ValidateObjectUpdate(newObj, oldObj)
-	case api.ResourceTypeBundle:
-		newObjs, err := api.DecodeManifestBundleToObjects(new)
-		if err != nil {
-			return fmt.Errorf("failed to decode new manifest bundle: %v", err)
-		}
-		oldObjs, err := api.DecodeManifestBundleToObjects(old)
-		if err != nil {
-			return fmt.Errorf("failed to decode old manifest bundle: %v", err)
-		}
-		if len(newObjs) != len(oldObjs) {
-			return fmt.Errorf("new and old manifest bundles have different number of objects")
-		}
-		if len(newObjs) == 0 || len(oldObjs) == 0 {
-			return fmt.Errorf("new or old manifest bundle is empty")
-		}
-		for i := range newObjs {
-			if err := ValidateObjectUpdate(newObjs[i], oldObjs[i]); err != nil {
-				return err
-			}
-		}
-	default:
-		return fmt.Errorf("unknown resource type: %s", resType)
 	}
 
 	return nil

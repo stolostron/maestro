@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/openshift-online/maestro/pkg/logger"
 	"gorm.io/gorm"
 )
 
@@ -89,8 +88,6 @@ func NewAdvisoryLockFactory(connection SessionFactory) *AdvisoryLockFactory {
 }
 
 func (f *AdvisoryLockFactory) NewAdvisoryLock(ctx context.Context, id string, lockType LockType) (string, error) {
-	log := logger.NewOCMLogger(ctx)
-
 	lock, err := f.newLock(ctx, id, lockType)
 	if err != nil {
 		return "", err
@@ -98,7 +95,7 @@ func (f *AdvisoryLockFactory) NewAdvisoryLock(ctx context.Context, id string, lo
 
 	// obtain the advisory lock (blocking)
 	if err := lock.lock(); err != nil {
-		UpdateAdvisoryLockCountMetric(lockType, "lock error")
+		UpdateAdvisoryLockCountMetric(lockType, "ERROR")
 		errMsg := fmt.Sprintf("error obtaining the advisory lock for id %s type %s, %v", id, lockType, err)
 		log.Error(errMsg)
 		// the lock transaction is already started, if error happens, we return the transaction id, so that the caller
@@ -106,14 +103,12 @@ func (f *AdvisoryLockFactory) NewAdvisoryLock(ctx context.Context, id string, lo
 		return *lock.uuid, fmt.Errorf(errMsg)
 	}
 
-	log.V(10).Info(fmt.Sprintf("Locked advisory lock id=%s type=%s - owner=%s", id, lockType, *lock.uuid))
+	UpdateAdvisoryLockCountMetric(lockType, "OK")
 	f.lockStore.add(*lock.uuid, lock)
 	return *lock.uuid, nil
 }
 
 func (f *AdvisoryLockFactory) NewNonBlockingLock(ctx context.Context, id string, lockType LockType) (string, bool, error) {
-	log := logger.NewOCMLogger(ctx)
-
 	lock, err := f.newLock(ctx, id, lockType)
 	if err != nil {
 		return "", false, err
@@ -122,7 +117,7 @@ func (f *AdvisoryLockFactory) NewNonBlockingLock(ctx context.Context, id string,
 	// obtain the advisory lock (unblocking)
 	acquired, err := lock.nonBlockingLock()
 	if err != nil {
-		UpdateAdvisoryLockCountMetric(lockType, "lock error")
+		UpdateAdvisoryLockCountMetric(lockType, "ERROR")
 		errMsg := fmt.Sprintf("error obtaining the non blocking advisory lock for id %s type %s, %v", id, lockType, err)
 		log.Error(errMsg)
 		// the lock transaction is already started, if error happens, we return the transaction id, so that the caller
@@ -130,7 +125,7 @@ func (f *AdvisoryLockFactory) NewNonBlockingLock(ctx context.Context, id string,
 		return *lock.uuid, false, fmt.Errorf(errMsg)
 	}
 
-	log.V(10).Info(fmt.Sprintf("Locked non blocking advisory lock id=%s type=%s - owner=%s", id, lockType, *lock.uuid))
+	UpdateAdvisoryLockCountMetric(lockType, "OK")
 	f.lockStore.add(*lock.uuid, lock)
 	return *lock.uuid, acquired, nil
 }
@@ -154,8 +149,6 @@ func (f *AdvisoryLockFactory) newLock(ctx context.Context, id string, lockType L
 
 // Unlock searches current locks and unlocks the one matching its owner id.
 func (f *AdvisoryLockFactory) Unlock(ctx context.Context, uuid string) {
-	log := logger.NewOCMLogger(ctx)
-
 	if uuid == "" {
 		return
 	}
@@ -165,7 +158,7 @@ func (f *AdvisoryLockFactory) Unlock(ctx context.Context, uuid string) {
 		// the resolving UUID belongs to a service call that did *not* initiate the lock.
 		// we can safely ignore this, knowing the top-most func in the call stack
 		// will provide the correct UUID.
-		log.V(10).Info(fmt.Sprintf("Caller not lock owner. Owner %s", uuid))
+		log.Debugf("Caller not lock owner. Owner %s", uuid)
 		return
 	}
 
@@ -176,14 +169,13 @@ func (f *AdvisoryLockFactory) Unlock(ctx context.Context, uuid string) {
 	}
 
 	if err := lock.unlock(); err != nil {
-		UpdateAdvisoryLockCountMetric(lockType, "unlock error")
-		log.Extra("lockID", lockID).Extra("owner", uuid).Error(fmt.Sprintf("Could not unlock, %v", err))
+		UpdateAdvisoryUnlockCountMetric(lockType, "ERROR")
+		log.With("lockID", lockID).With("lockType", lockType).With("owner", uuid).Errorf("error unlocking advisory lock: %v", err)
 	}
 
-	UpdateAdvisoryLockCountMetric(lockType, "OK")
+	UpdateAdvisoryUnlockCountMetric(lockType, "OK")
 	UpdateAdvisoryLockDurationMetric(lockType, "OK", lock.startTime)
 
-	log.V(10).Info(fmt.Sprintf("Unlocked lock id=%s type=%s - owner=%s", lockID, lockType, uuid))
 	f.lockStore.delete(uuid)
 }
 

@@ -10,10 +10,15 @@ import (
 	"github.com/openshift-online/maestro/pkg/logger"
 	"github.com/openshift-online/maestro/pkg/services"
 	"github.com/prometheus/client_golang/prometheus"
+	workv1 "open-cluster-management.io/api/work/v1"
+	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/payload"
 	cegeneric "open-cluster-management.io/sdk-go/pkg/cloudevents/generic"
 	ceoptions "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/options"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
 	cetypes "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
 )
+
+var log = logger.GetLogger()
 
 // SourceClient is an interface for publishing resource events to consumers
 // subscribing to and resyncing resource status from consumers.
@@ -28,16 +33,15 @@ type SourceClient interface {
 
 type SourceClientImpl struct {
 	Codec                  cegeneric.Codec[*api.Resource]
-	BundleCodec            cegeneric.Codec[*api.Resource]
 	CloudEventSourceClient *cegeneric.CloudEventSourceClient[*api.Resource]
 	ResourceService        services.ResourceService
 }
 
 func NewSourceClient(sourceOptions *ceoptions.CloudEventsSourceOptions, resourceService services.ResourceService) (SourceClient, error) {
 	ctx := context.Background()
-	codec, bundleCodec := &Codec{sourceID: sourceOptions.SourceID}, &BundleCodec{sourceID: sourceOptions.SourceID}
+	codec := NewCodec(sourceOptions.SourceID)
 	ceSourceClient, err := cegeneric.NewCloudEventSourceClient[*api.Resource](ctx, sourceOptions,
-		resourceService, ResourceStatusHashGetter, codec, bundleCodec)
+		resourceService, ResourceStatusHashGetter, codec)
 	if err != nil {
 		return nil, err
 	}
@@ -47,31 +51,35 @@ func NewSourceClient(sourceOptions *ceoptions.CloudEventsSourceOptions, resource
 
 	return &SourceClientImpl{
 		Codec:                  codec,
-		BundleCodec:            bundleCodec,
 		CloudEventSourceClient: ceSourceClient,
 		ResourceService:        resourceService,
 	}, nil
 }
 
 func (s *SourceClientImpl) OnCreate(ctx context.Context, id string) error {
-	logger := logger.NewOCMLogger(ctx)
-
 	resource, err := s.ResourceService.Get(ctx, id)
 	if err != nil {
+		if err.Is404() {
+			log.Infof("skipping to publish create request for resource %s as it is not found", id)
+			return nil
+		}
+
 		return err
 	}
 
-	logger.V(4).Infof("Publishing resource %s for db row insert", resource.ID)
+	if !resource.Meta.DeletedAt.Time.IsZero() {
+		log.Infof("delete resource %s as it is not created on the agent yet", resource.ID)
+		return s.ResourceService.Delete(ctx, id)
+	}
+
+	log.Infof("Publishing resource %s for db row insert", resource.ID)
 	eventType := cetypes.CloudEventsType{
 		CloudEventsDataType: s.Codec.EventDataType(),
 		SubResource:         cetypes.SubResourceSpec,
 		Action:              cetypes.EventAction("create_request"),
 	}
-	if resource.Type == api.ResourceTypeBundle {
-		eventType.CloudEventsDataType = s.BundleCodec.EventDataType()
-	}
 	if err := s.CloudEventSourceClient.Publish(ctx, eventType, resource); err != nil {
-		logger.Error(fmt.Sprintf("Failed to publish resource %s: %s", resource.ID, err))
+		log.Errorf("Failed to publish resource %s: %v", resource.ID, err)
 		return err
 	}
 
@@ -79,24 +87,23 @@ func (s *SourceClientImpl) OnCreate(ctx context.Context, id string) error {
 }
 
 func (s *SourceClientImpl) OnUpdate(ctx context.Context, id string) error {
-	logger := logger.NewOCMLogger(ctx)
-
 	resource, err := s.ResourceService.Get(ctx, id)
 	if err != nil {
+		if err.Is404() {
+			log.Infof("skipping to publish update request for resource %s as it is not found", id)
+			return nil
+		}
 		return err
 	}
 
-	logger.V(4).Infof("Publishing resource %s for db row update", resource.ID)
+	log.Infof("Publishing resource %s for db row update", resource.ID)
 	eventType := cetypes.CloudEventsType{
 		CloudEventsDataType: s.Codec.EventDataType(),
 		SubResource:         cetypes.SubResourceSpec,
 		Action:              cetypes.EventAction("update_request"),
 	}
-	if resource.Type == api.ResourceTypeBundle {
-		eventType.CloudEventsDataType = s.BundleCodec.EventDataType()
-	}
 	if err := s.CloudEventSourceClient.Publish(ctx, eventType, resource); err != nil {
-		logger.Error(fmt.Sprintf("Failed to publish resource %s: %s", resource.ID, err))
+		log.Errorf("Failed to publish resource %s: %v", resource.ID, err)
 		return err
 	}
 
@@ -104,10 +111,12 @@ func (s *SourceClientImpl) OnUpdate(ctx context.Context, id string) error {
 }
 
 func (s *SourceClientImpl) OnDelete(ctx context.Context, id string) error {
-	logger := logger.NewOCMLogger(ctx)
-
 	resource, err := s.ResourceService.Get(ctx, id)
 	if err != nil {
+		if err.Is404() {
+			log.Infof("skipping to publish delete request for resource %s as it is not found", id)
+			return nil
+		}
 		return err
 	}
 
@@ -115,17 +124,14 @@ func (s *SourceClientImpl) OnDelete(ctx context.Context, id string) error {
 	if resource.Meta.DeletedAt.Time.IsZero() {
 		return fmt.Errorf("resource %s has not been marked as deleting", resource.ID)
 	}
-	logger.V(4).Infof("Publishing resource %s for db row delete", resource.ID)
+	log.Infof("Publishing resource %s for db row delete", resource.ID)
 	eventType := cetypes.CloudEventsType{
 		CloudEventsDataType: s.Codec.EventDataType(),
 		SubResource:         cetypes.SubResourceSpec,
 		Action:              cetypes.EventAction("delete_request"),
 	}
-	if resource.Type == api.ResourceTypeBundle {
-		eventType.CloudEventsDataType = s.BundleCodec.EventDataType()
-	}
 	if err := s.CloudEventSourceClient.Publish(ctx, eventType, resource); err != nil {
-		logger.Error(fmt.Sprintf("Failed to publish resource %s: %s", resource.ID, err))
+		log.Errorf("Failed to publish resource %s: %v", resource.ID, err)
 		return err
 	}
 
@@ -137,10 +143,7 @@ func (s *SourceClientImpl) Subscribe(ctx context.Context, handlers ...cegeneric.
 }
 
 func (s *SourceClientImpl) Resync(ctx context.Context, consumers []string) error {
-	logger := logger.NewOCMLogger(ctx)
-
-	logger.V(4).Infof("Resyncing resource status from consumers %v", consumers)
-
+	log.Infof("Resyncing resource status from consumers %v", consumers)
 	for _, consumer := range consumers {
 		if err := s.CloudEventSourceClient.Resync(ctx, consumer); err != nil {
 			return err
@@ -154,15 +157,42 @@ func (s *SourceClientImpl) ReconnectedChan() <-chan struct{} {
 	return s.CloudEventSourceClient.ReconnectedChan()
 }
 
+// ResourceStatusHashGetter returns a hash of the resource status.
+// It calculates the hash based on the manifestwork status to ensure consistency
+// with the agent's status calculation. The resource status is converted to
+// manifestwork status based on resource type before calculating the hash.
 func ResourceStatusHashGetter(res *api.Resource) (string, error) {
-	status, err := api.DecodeStatus(res.Status)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode resource status, %v", err)
+	if len(res.Status) == 0 {
+		return fmt.Sprintf("%x", sha256.Sum256([]byte(""))), nil
 	}
-	statusBytes, err := json.Marshal(status)
+	evt, err := api.JSONMAPToCloudEvent(res.Status)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal resource status, %v", err)
+		return "", fmt.Errorf("failed to convert resource status to cloud event, %v", err)
 	}
 
-	return fmt.Sprintf("%x", sha256.Sum256(statusBytes)), nil
+	// retrieve stash hash from status CloudEvent extension;
+	// if not found, calculate the status hash by itself
+	evtExtensions := evt.Context.GetExtensions()
+	statusHashVal, ok := evtExtensions[types.ExtensionStatusHash]
+	if ok {
+		return fmt.Sprintf("%v", statusHashVal), nil
+	}
+
+	// calculate the status hash by itself
+	eventPayload := &workpayload.ManifestBundleStatus{}
+	if err := evt.DataAs(eventPayload); err != nil {
+		return "", fmt.Errorf("failed to decode cloudevent data as manifest bundle status: %v", err)
+	}
+	workStatus := workv1.ManifestWorkStatus{
+		Conditions: eventPayload.Conditions,
+		ResourceStatus: workv1.ManifestResourceStatus{
+			Manifests: eventPayload.ResourceStatus,
+		},
+	}
+	workStatusBytes, err := json.Marshal(workStatus)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal work status, %v", err)
+	}
+
+	return fmt.Sprintf("%x", sha256.Sum256(workStatusBytes)), nil
 }

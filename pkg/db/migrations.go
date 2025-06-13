@@ -5,15 +5,21 @@ import (
 
 	"github.com/go-gormigrate/gormigrate/v2"
 	"github.com/openshift-online/maestro/pkg/db/migrations"
-	"k8s.io/klog/v2"
+	"github.com/openshift-online/maestro/pkg/logger"
 
 	"gorm.io/gorm"
 )
+
+var log = logger.GetLogger()
 
 // gormigrate is a wrapper for gorm's migration functions that adds schema versioning and rollback capabilities.
 // For help writing migration steps, see the gorm documentation on migrations: http://doc.gorm.io/database.html#migration
 
 func Migrate(g2 *gorm.DB) error {
+	if err := migrations.CleanUpDirtyData(g2); err != nil {
+		return err
+	}
+
 	m := newGormigrate(g2)
 
 	if err := m.Migrate(); err != nil {
@@ -30,7 +36,7 @@ func MigrateTo(sessionFactory SessionFactory, migrationID string) {
 	m := newGormigrate(g2)
 
 	if err := m.MigrateTo(migrationID); err != nil {
-		klog.Fatalf("Could not migrate: %v", err)
+		log.Fatalf("Could not migrate: %v", err)
 	}
 }
 

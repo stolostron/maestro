@@ -7,24 +7,20 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"time"
 
 	ce "github.com/cloudevents/sdk-go/v2"
 	"github.com/cloudevents/sdk-go/v2/binding"
 	cetypes "github.com/cloudevents/sdk-go/v2/types"
-	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/types/known/emptypb"
-	"k8s.io/klog/v2"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/common"
+	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/payload"
 	pbv1 "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/options/grpc/protobuf/v1"
 	grpcprotocol "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/options/grpc/protocol"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/payload"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/common"
-	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/work/payload"
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/source/codec"
 
 	"github.com/openshift-online/maestro/pkg/api"
 	"github.com/openshift-online/maestro/pkg/client/cloudevents"
@@ -54,11 +50,19 @@ func NewGRPCServer(resourceService services.ResourceService, eventBroadcaster *e
 	grpcServerOptions = append(grpcServerOptions, grpc.ConnectionTimeout(config.ConnectionTimeout))
 	grpcServerOptions = append(grpcServerOptions, grpc.WriteBufferSize(config.WriteBufferSize))
 	grpcServerOptions = append(grpcServerOptions, grpc.ReadBufferSize(config.ReadBufferSize))
+	grpcServerOptions = append(grpcServerOptions, grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+		MinTime:             config.ClientMinPingInterval,
+		PermitWithoutStream: config.PermitPingWithoutStream,
+	}))
 	grpcServerOptions = append(grpcServerOptions, grpc.KeepaliveParams(keepalive.ServerParameters{
 		MaxConnectionAge: config.MaxConnectionAge,
+		Time:             config.ServerPingInterval,
+		Timeout:          config.ServerPingTimeout,
 	}))
 
-	if !config.DisableTLS {
+	disableTLS := (config.TLSCertFile == "" && config.TLSKeyFile == "")
+
+	if !disableTLS {
 		// Check tls cert and key path path
 		if config.TLSCertFile == "" || config.TLSKeyFile == "" {
 			check(
@@ -107,10 +111,10 @@ func NewGRPCServer(resourceService services.ResourceService, eventBroadcaster *e
 			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 
 			grpcServerOptions = append(grpcServerOptions, grpc.Creds(credentials.NewTLS(tlsConfig)))
-			klog.Infof("Serving gRPC service with mTLS at %s", config.ServerBindPort)
+			log.Infof("Serving gRPC service with mTLS at %s", config.ServerBindPort)
 		} else {
 			grpcServerOptions = append(grpcServerOptions, grpc.Creds(credentials.NewTLS(tlsConfig)))
-			klog.Infof("Serving gRPC service with TLS at %s", config.ServerBindPort)
+			log.Infof("Serving gRPC service with TLS at %s", config.ServerBindPort)
 		}
 	} else {
 		// append metrics interceptor
@@ -118,14 +122,14 @@ func NewGRPCServer(resourceService services.ResourceService, eventBroadcaster *e
 			grpc.UnaryInterceptor(newMetricsUnaryInterceptor()),
 			grpc.StreamInterceptor(newMetricsStreamInterceptor()))
 		// Note: Do not use this in production.
-		klog.Infof("Serving gRPC service without TLS at %s", config.ServerBindPort)
+		log.Infof("Serving gRPC service without TLS at %s", config.ServerBindPort)
 	}
 
 	return &GRPCServer{
 		grpcServer:        grpc.NewServer(grpcServerOptions...),
 		eventBroadcaster:  eventBroadcaster,
 		resourceService:   resourceService,
-		disableAuthorizer: config.DisableTLS,
+		disableAuthorizer: disableTLS,
 		grpcAuthorizer:    grpcAuthorizer,
 		bindAddress:       env().Config.HTTPServer.Hostname + ":" + config.ServerBindPort,
 	}
@@ -133,10 +137,10 @@ func NewGRPCServer(resourceService services.ResourceService, eventBroadcaster *e
 
 // Start starts the gRPC server
 func (svr *GRPCServer) Start() error {
-	klog.Info("Starting gRPC server")
+	log.Info("Starting gRPC server")
 	lis, err := net.Listen("tcp", svr.bindAddress)
 	if err != nil {
-		klog.Errorf("failed to listen: %v", err)
+		log.Errorf("failed to listen: %v", err)
 		return err
 	}
 	pbv1.RegisterCloudEventServiceServer(svr.grpcServer, svr)
@@ -174,18 +178,19 @@ func (svr *GRPCServer) Publish(ctx context.Context, pubReq *pbv1.PublishRequest)
 		return nil, fmt.Errorf("failed to parse cloud event type %s, %v", evt.Type(), err)
 	}
 
-	klog.V(4).Infof("receive the event with grpc server, %s", evt)
+	log.Infof("receive the event from client, %s", evt.Context)
+	log.Debugf("receive the event from client, evt=%s", evt)
 
 	// handler resync request
 	if eventType.Action == types.ResyncRequestAction {
-		err := svr.respondResyncStatusRequest(ctx, eventType.CloudEventsDataType, evt)
+		err := svr.respondResyncStatusRequest(ctx, evt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to respond resync status request: %v", err)
 		}
 		return &emptypb.Empty{}, nil
 	}
 
-	res, err := decodeResourceSpec(eventType.CloudEventsDataType, evt)
+	res, err := decodeResourceSpec(evt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode cloudevent: %v", err)
 	}
@@ -197,20 +202,17 @@ func (svr *GRPCServer) Publish(ctx context.Context, pubReq *pbv1.PublishRequest)
 			return nil, fmt.Errorf("failed to create resource: %v", err)
 		}
 	case common.UpdateRequestAction:
-		if res.Type == api.ResourceTypeBundle {
-			found, err := svr.resourceService.Get(ctx, res.ID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get resource: %v", err)
-			}
-
-			if res.Version == 0 {
-				// the resource version is not guaranteed to be increased by source client,
-				// using the latest resource version.
-				res.Version = found.Version
-			}
-		}
-		_, err := svr.resourceService.Update(ctx, res)
+		found, err := svr.resourceService.Get(ctx, res.ID)
 		if err != nil {
+			return nil, fmt.Errorf("failed to get resource: %v", err)
+		}
+
+		if res.Version == 0 {
+			// the resource version is not guaranteed to be increased by source client,
+			// using the latest resource version.
+			res.Version = found.Version
+		}
+		if _, err = svr.resourceService.Update(ctx, res); err != nil {
 			return nil, fmt.Errorf("failed to update resource: %v", err)
 		}
 	case common.DeleteRequestAction:
@@ -247,7 +249,8 @@ func (svr *GRPCServer) Subscribe(subReq *pbv1.SubscriptionRequest, subServer pbv
 			return fmt.Errorf("failed to encode resource %s to cloudevent: %v", res.ID, err)
 		}
 
-		klog.V(4).Infof("send the event to status subscribers, %s", evt)
+		log.Infof("send the event to status subscribers, %s", evt.Context)
+		log.Debugf("send the event to status subscribers, evt=%s", evt)
 
 		// WARNING: don't use "pbEvt, err := pb.ToProto(evt)" to convert cloudevent to protobuf
 		pbEvt := &pbv1.CloudEvent{}
@@ -266,18 +269,17 @@ func (svr *GRPCServer) Subscribe(subReq *pbv1.SubscriptionRequest, subServer pbv
 
 	select {
 	case err := <-errChan:
-		klog.Errorf("unregister client %s, error= %v", clientID, err)
+		log.Infof("unregistering client %s due to error= %v", clientID, err)
 		svr.eventBroadcaster.Unregister(clientID)
 		return err
 	case <-subServer.Context().Done():
-		klog.V(10).Infof("unregister client %s", clientID)
 		svr.eventBroadcaster.Unregister(clientID)
 		return nil
 	}
 }
 
 // decodeResourceSpec translates a CloudEvent into a resource containing the spec JSON map.
-func decodeResourceSpec(eventDataType types.CloudEventsDataType, evt *ce.Event) (*api.Resource, error) {
+func decodeResourceSpec(evt *ce.Event) (*api.Resource, error) {
 	evtExtensions := evt.Context.GetExtensions()
 
 	clusterName, err := cetypes.ToString(evtExtensions[types.ExtensionClusterName])
@@ -318,43 +320,14 @@ func decodeResourceSpec(eventDataType types.CloudEventsDataType, evt *ce.Event) 
 	}
 	resource.Payload = payload
 
-	switch eventDataType {
-	case workpayload.ManifestEventDataType:
-		resource.Type = api.ResourceTypeSingle
-	case workpayload.ManifestBundleEventDataType:
-		resource.Type = api.ResourceTypeBundle
-	default:
-		return nil, fmt.Errorf("unsupported cloudevents data type %s", eventDataType)
-	}
-
 	return resource, nil
 }
 
 // encodeResourceStatus translates a resource status JSON map into a CloudEvent.
 func encodeResourceStatus(resource *api.Resource) (*ce.Event, error) {
-	if resource.Type == api.ResourceTypeSingle {
-		// single resource, return the status directly
-		return api.JSONMAPToCloudEvent(resource.Status)
-	}
-
 	statusEvt, err := api.JSONMAPToCloudEvent(resource.Status)
 	if err != nil {
 		return nil, err
-	}
-
-	// set basic fields
-	evt := ce.NewEvent()
-	evt.SetID(uuid.New().String())
-	evt.SetTime(time.Now())
-	evt.SetType(statusEvt.Type())
-	evt.SetSource(statusEvt.Source())
-	for key, val := range statusEvt.Extensions() {
-		evt.SetExtension(key, val)
-	}
-
-	// set work meta back from status event
-	if workMeta, ok := statusEvt.Extensions()[codec.ExtensionWorkMeta]; ok {
-		evt.SetExtension(codec.ExtensionWorkMeta, workMeta)
 	}
 
 	// manifest bundle status from the resource status
@@ -363,6 +336,7 @@ func encodeResourceStatus(resource *api.Resource) (*ce.Event, error) {
 		return nil, err
 	}
 
+	// fill the resource status with resource payload
 	if len(resource.Payload) > 0 {
 		specEvt, err := api.JSONMAPToCloudEvent(resource.Payload)
 		if err != nil {
@@ -377,16 +351,16 @@ func encodeResourceStatus(resource *api.Resource) (*ce.Event, error) {
 		manifestBundleStatus.ManifestBundle = manifestBundle
 	}
 
-	if err := evt.SetData(ce.ApplicationJSON, manifestBundleStatus); err != nil {
+	if err := statusEvt.SetData(ce.ApplicationJSON, manifestBundleStatus); err != nil {
 		return nil, err
 	}
 
-	return &evt, nil
+	return statusEvt, nil
 }
 
 // respondResyncStatusRequest responds to the status resync request by comparing the status hash of the resources
 // from the database and the status hash in the request, and then respond the resources whose status is changed.
-func (svr *GRPCServer) respondResyncStatusRequest(ctx context.Context, eventDataType types.CloudEventsDataType, evt *ce.Event) error {
+func (svr *GRPCServer) respondResyncStatusRequest(ctx context.Context, evt *ce.Event) error {
 	objs, serviceErr := svr.resourceService.FindBySource(ctx, evt.Source())
 	if serviceErr != nil {
 		return fmt.Errorf("failed to list resources: %s", serviceErr)
@@ -406,20 +380,11 @@ func (svr *GRPCServer) respondResyncStatusRequest(ctx context.Context, eventData
 		return nil
 	}
 
-	resyncType := api.ResourceTypeSingle
-	if eventDataType == workpayload.ManifestBundleEventDataType {
-		resyncType = api.ResourceTypeBundle
-	}
-
 	for _, obj := range objs {
-		if obj.Type != resyncType {
-			continue
-		}
-
 		lastHash, ok := findStatusHash(string(obj.GetUID()), statusHashes.Hashes)
 		if !ok {
 			// ignore the resource that is not on the source, but exists on the maestro, wait for the source deleting it
-			klog.Infof("The resource %s is not found from the maestro, ignore", obj.GetUID())
+			log.Infof("The resource %s is not found from the maestro, ignore", obj.GetUID())
 			continue
 		}
 

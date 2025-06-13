@@ -31,6 +31,7 @@
 
 # Ignore built binaries
 /maestro
+/maestroperf
 
 # Ignore generated templates
 /templates/*-template.json
@@ -58,6 +59,7 @@ test/e2e/.consumer_id
 test/e2e/.consumer_name
 test/e2e/.external_host_ip
 test/e2e/report/*
+test/e2e/certs
 unit-test-results.json
-integration-test-results.json
+*integration-test-results.json
 test/e2e/setup/aro/aro-hcp

@@ -12,30 +12,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openshift-online/maestro/pkg/client/cloudevents"
 	"github.com/openshift-online/maestro/pkg/controllers"
 	"github.com/openshift-online/maestro/pkg/dao"
 	"github.com/openshift-online/maestro/pkg/dispatcher"
 	"github.com/openshift-online/maestro/pkg/event"
 	"github.com/openshift-online/maestro/pkg/logger"
-	"k8s.io/klog/v2"
 
 	workinformers "open-cluster-management.io/api/client/work/informers/externalversions"
 	workv1informers "open-cluster-management.io/api/client/work/informers/externalversions/work/v1"
-	workv1 "open-cluster-management.io/api/work/v1"
 
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/options"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/agent/codec"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/store"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/options/grpc"
 	grpcoptions "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/options/grpc"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/options/mqtt"
 	"open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/work"
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/agent/codec"
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/store"
 
 	"github.com/bxcodec/faker/v3"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 	"github.com/segmentio/ksuid"
 	"github.com/spf13/pflag"
+
+	envtypes "github.com/openshift-online/maestro/cmd/maestro/environments/types"
 
 	amv1 "github.com/openshift-online/ocm-sdk-go/accountsmgmt/v1"
 
@@ -58,6 +61,7 @@ const (
 
 var helper *Helper
 var once sync.Once
+var log = logger.GetLogger()
 
 // TODO jwk mock server needs to be refactored out of the helper and into the testing environment
 var jwkURL string
@@ -71,8 +75,8 @@ type Helper struct {
 	Ctx               context.Context
 	ContextCancelFunc context.CancelFunc
 
+	Broker            string
 	EventBroadcaster  *event.EventBroadcaster
-	StatusDispatcher  dispatcher.Dispatcher
 	Store             *MemoryStore
 	GRPCSourceClient  *generic.CloudEventSourceClient[*api.Resource]
 	DBFactory         db.SessionFactory
@@ -80,7 +84,9 @@ type Helper struct {
 	APIServer         server.Server
 	MetricsServer     server.Server
 	HealthCheckServer *server.HealthCheckServer
+	StatusDispatcher  dispatcher.Dispatcher
 	EventServer       server.EventServer
+	EventFilter       controllers.EventFilter
 	ControllerManager *server.ControllersServer
 	WorkAgentHolder   *work.ClientHolder
 	WorkAgentInformer workv1informers.ManifestWorkInformer
@@ -100,38 +106,59 @@ func NewHelper(t *testing.T) *Helper {
 
 		env := helper.Env()
 		// Manually set environment name, ignoring environment variables
-		env.Name = environments.TestingEnv
+		env.Name = envtypes.TestingEnv
 		err = env.AddFlags(pflag.CommandLine)
 		if err != nil {
-			klog.Fatalf("Unable to add environment flags: %s", err.Error())
+			log.Fatalf("Unable to add environment flags: %s", err.Error())
 		}
 		if logLevel := os.Getenv("LOGLEVEL"); logLevel != "" {
-			klog.Infof("Using custom loglevel: %s", logLevel)
+			log.Infof("Using custom loglevel: %s", logLevel)
 			pflag.CommandLine.Set("-v", logLevel)
 		}
 		pflag.Parse()
 
+		// Set the message broker type if it is set in the environment
+		broker := os.Getenv("BROKER")
+		if broker != "" {
+			env.Config.MessageBroker.MessageBrokerType = broker
+		}
+
 		err = env.Initialize()
 		if err != nil {
-			klog.Fatalf("Unable to initialize testing environment: %s", err.Error())
+			log.Fatalf("Unable to initialize testing environment: %s", err.Error())
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		helper = &Helper{
 			Ctx:               ctx,
 			ContextCancelFunc: cancel,
+			Broker:            env.Config.MessageBroker.MessageBrokerType,
 			EventBroadcaster:  event.NewEventBroadcaster(),
-			StatusDispatcher: dispatcher.NewHashDispatcher(
+			AppConfig:         env.Config,
+			DBFactory:         env.Database.SessionFactory,
+			JWTPrivateKey:     jwtKey,
+			JWTCA:             jwtCA,
+		}
+
+		// Set the healthcheck interval to 1 second for testing
+		helper.Env().Config.HealthCheck.HeartbeartInterval = 1
+		helper.HealthCheckServer = server.NewHealthCheckServer()
+		// Disable TLS for testing
+		helper.Env().Config.GRPCServer.DisableTLS = true
+
+		if helper.Broker != "grpc" {
+			helper.StatusDispatcher = dispatcher.NewHashDispatcher(
 				helper.Env().Config.MessageBroker.ClientID,
-				dao.NewInstanceDao(&helper.Env().Database.SessionFactory),
-				dao.NewConsumerDao(&helper.Env().Database.SessionFactory),
+				helper.Env().Database.SessionFactory,
 				helper.Env().Clients.CloudEventsSource,
 				helper.Env().Config.EventServer.ConsistentHashConfig,
-			),
-			AppConfig:     env.Config,
-			DBFactory:     env.Database.SessionFactory,
-			JWTPrivateKey: jwtKey,
-			JWTCA:         jwtCA,
+				1*time.Second,
+			)
+			helper.EventServer = server.NewMessageQueueEventServer(helper.EventBroadcaster, helper.StatusDispatcher)
+			helper.EventFilter = controllers.NewLockBasedEventFilter(db.NewAdvisoryLockFactory(helper.Env().Database.SessionFactory))
+		} else {
+			helper.EventServer = server.NewGRPCBroker(helper.EventBroadcaster)
+			helper.EventFilter = controllers.NewPredicatedEventFilter(helper.EventServer.PredicateEvent)
 		}
 
 		// TODO jwk mock server needs to be refactored out of the helper and into the testing environment
@@ -173,12 +200,11 @@ func (helper *Helper) Teardown() {
 func (helper *Helper) startAPIServer() {
 	// TODO jwk mock server needs to be refactored out of the helper and into the testing environment
 	helper.Env().Config.HTTPServer.JwkCertURL = jwkURL
-	helper.Env().Config.GRPCServer.DisableTLS = true
 	helper.APIServer = server.NewAPIServer(helper.EventBroadcaster)
 	go func() {
-		klog.V(10).Info("Test API server started")
+		log.Debug("Test API server started")
 		helper.APIServer.Start()
-		klog.V(10).Info("Test API server stopped")
+		log.Debug("Test API server stopped")
 	}()
 }
 
@@ -192,9 +218,9 @@ func (helper *Helper) stopAPIServer() error {
 func (helper *Helper) startMetricsServer() {
 	helper.MetricsServer = server.NewMetricsServer()
 	go func() {
-		klog.V(10).Info("Test Metrics server started")
+		log.Debug("Test Metrics server started")
 		helper.MetricsServer.Start()
-		klog.V(10).Info("Test Metrics server stopped")
+		log.Debug("Test Metrics server stopped")
 	}()
 }
 
@@ -206,13 +232,10 @@ func (helper *Helper) stopMetricsServer() error {
 }
 
 func (helper *Helper) startHealthCheckServer(ctx context.Context) {
-	helper.Env().Config.HealthCheck.HeartbeartInterval = 1
-	helper.HealthCheckServer = server.NewHealthCheckServer()
-	helper.HealthCheckServer.SetStatusDispatcher(helper.StatusDispatcher)
 	go func() {
-		klog.V(10).Info("Test health check server started")
+		log.Debug("Test health check server started")
 		helper.HealthCheckServer.Start(ctx)
-		klog.V(10).Info("Test health check server stopped")
+		log.Debug("Test health check server stopped")
 	}()
 }
 
@@ -222,27 +245,25 @@ func (helper *Helper) sendShutdownSignal() error {
 }
 
 func (helper *Helper) startEventServer(ctx context.Context) {
-	// helper.Env().Config.EventServer.SubscriptionType = "broadcast"
-	helper.EventServer = server.NewMessageQueueEventServer(helper.EventBroadcaster, helper.StatusDispatcher)
 	go func() {
-		klog.V(10).Info("Test event server started")
+		log.Debug("Test event server started")
 		helper.EventServer.Start(ctx)
-		klog.V(10).Info("Test event server stopped")
+		log.Debug("Test event server stopped")
 	}()
 }
 
 func (helper *Helper) startEventBroadcaster() {
 	go func() {
-		klog.V(10).Info("Test event broadcaster started")
+		log.Debug("Test event broadcaster started")
 		helper.EventBroadcaster.Start(helper.Ctx)
-		klog.V(10).Info("Test event broadcaster stopped")
+		log.Debug("Test event broadcaster stopped")
 	}()
 }
 
 func (helper *Helper) StartControllerManager(ctx context.Context) {
 	helper.ControllerManager = &server.ControllersServer{
 		KindControllerManager: controllers.NewKindControllerManager(
-			db.NewAdvisoryLockFactory(helper.Env().Database.SessionFactory),
+			helper.EventFilter,
 			helper.Env().Services.Events(),
 		),
 		StatusController: controllers.NewStatusController(
@@ -269,30 +290,30 @@ func (helper *Helper) StartControllerManager(ctx context.Context) {
 	go helper.ControllerManager.Start(ctx)
 }
 
-func (helper *Helper) StartWorkAgent(ctx context.Context, clusterName string, bundle bool) {
-	// initilize the mqtt options
-	mqttOptions, err := mqtt.BuildMQTTOptionsFromFlags(helper.Env().Config.MessageBroker.MessageBrokerConfig)
-	if err != nil {
-		klog.Fatalf("Unable to build MQTT options: %s", err.Error())
-	}
-
-	var workCodec generic.Codec[*workv1.ManifestWork]
-	if bundle {
-		workCodec = codec.NewManifestBundleCodec()
+func (helper *Helper) StartWorkAgent(ctx context.Context, clusterName string) {
+	var brokerConfig any
+	if helper.Broker != "grpc" {
+		// initilize the mqtt options
+		mqttOptions, err := mqtt.BuildMQTTOptionsFromFlags(helper.Env().Config.MessageBroker.MessageBrokerConfig)
+		if err != nil {
+			log.Fatalf("Unable to build MQTT options: %s", err.Error())
+		}
+		brokerConfig = mqttOptions
 	} else {
-		workCodec = codec.NewManifestCodec(nil)
+		// initilize the grpc options
+		grpcOptions := &grpc.GRPCOptions{Dialer: &grpc.GRPCDialer{}}
+		grpcOptions.Dialer.URL = fmt.Sprintf("%s:%s", helper.Env().Config.HTTPServer.Hostname, helper.Env().Config.GRPCServer.BrokerBindPort)
+		brokerConfig = grpcOptions
 	}
 
 	watcherStore := store.NewAgentInformerWatcherStore()
 
-	clientHolder, err := work.NewClientHolderBuilder(mqttOptions).
-		WithClientID(clusterName).
-		WithClusterName(clusterName).
-		WithCodecs(workCodec).
-		WithWorkClientWatcherStore(watcherStore).
-		NewAgentClientHolder(ctx)
+	clientOptions := options.NewGenericClientOptions(
+		brokerConfig, codec.NewManifestBundleCodec(), clusterName).WithClusterName(clusterName).
+		WithClientWatcherStore(watcherStore)
+	clientHolder, err := work.NewAgentClientHolder(ctx, clientOptions)
 	if err != nil {
-		klog.Fatalf("Unable to create work agent holder: %s", err)
+		log.Fatalf("Unable to create work agent holder: %s", err)
 	}
 
 	factory := workinformers.NewSharedInformerFactoryWithOptions(
@@ -310,20 +331,20 @@ func (helper *Helper) StartWorkAgent(ctx context.Context, clusterName string, bu
 }
 
 func (helper *Helper) StartGRPCResourceSourceClient() {
+	source := "maestro"
 	store := NewStore()
-	grpcOptions := grpcoptions.NewGRPCOptions()
-	grpcOptions.URL = fmt.Sprintf("%s:%s", helper.Env().Config.HTTPServer.Hostname, helper.Env().Config.GRPCServer.ServerBindPort)
+	grpcOptions := &grpc.GRPCOptions{Dialer: &grpc.GRPCDialer{}}
+	grpcOptions.Dialer.URL = fmt.Sprintf("%s:%s", helper.Env().Config.HTTPServer.Hostname, helper.Env().Config.GRPCServer.ServerBindPort)
 	sourceClient, err := generic.NewCloudEventSourceClient[*api.Resource](
 		helper.Ctx,
-		grpcoptions.NewSourceOptions(grpcOptions, "maestro"),
+		grpcoptions.NewSourceOptions(grpcOptions, source),
 		store,
 		resourceStatusHashGetter,
-		&ResourceCodec{},
-		&ResourceBundleCodec{},
+		cloudevents.NewCodec(source),
 	)
 
 	if err != nil {
-		klog.Fatalf("Unable to create grpc cloudevents source client: %s", err.Error())
+		log.Fatalf("Unable to create grpc cloudevents source client: %s", err.Error())
 	}
 
 	sourceClient.Subscribe(helper.Ctx, func(action types.ResourceAction, resource *api.Resource) error {
@@ -337,17 +358,17 @@ func (helper *Helper) StartGRPCResourceSourceClient() {
 func (helper *Helper) RestartServer() {
 	helper.stopAPIServer()
 	helper.startAPIServer()
-	klog.V(10).Info("Test API server restarted")
+	log.Debug("Test API server restarted")
 }
 
 func (helper *Helper) RestartMetricsServer() {
 	helper.stopMetricsServer()
 	helper.startMetricsServer()
-	klog.V(10).Info("Test metrics server restarted")
+	log.Debug("Test metrics server restarted")
 }
 
 func (helper *Helper) Reset() {
-	klog.Infof("Reseting testing environment")
+	log.Infof("Reseting testing environment")
 	env := helper.Env()
 	// Reset the configuration
 	env.Config = config.NewApplicationConfig()
@@ -361,7 +382,7 @@ func (helper *Helper) Reset() {
 
 	err := env.Initialize()
 	if err != nil {
-		klog.Fatalf("Unable to reset testing environment: %s", err.Error())
+		log.Fatalf("Unable to reset testing environment: %s", err.Error())
 	}
 	helper.AppConfig = env.Config
 	helper.RestartServer()
@@ -606,10 +627,9 @@ func parseJWTKeys() (*rsa.PrivateKey, *rsa.PublicKey, error) {
 
 // Return project root path based on the relative path of this file
 func getProjectRootDir() string {
-	ulog := logger.NewOCMLogger(context.Background())
 	curr, err := os.Getwd()
 	if err != nil {
-		ulog.Fatal(fmt.Sprintf("Unable to get working directory: %v", err.Error()))
+		log.Fatal(fmt.Sprintf("Unable to get working directory: %v", err.Error()))
 		return ""
 	}
 	root := curr
@@ -617,7 +637,7 @@ func getProjectRootDir() string {
 		anchor := filepath.Join(curr, ".git")
 		_, err = os.Stat(anchor)
 		if err != nil && !os.IsNotExist(err) {
-			ulog.Fatal(fmt.Sprintf("Unable to check if directory '%s' exists", anchor))
+			log.Fatal(fmt.Sprintf("Unable to check if directory '%s' exists", anchor))
 			break
 		}
 		if err == nil {

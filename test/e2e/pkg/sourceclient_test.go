@@ -22,20 +22,18 @@ import (
 
 	workv1 "open-cluster-management.io/api/work/v1"
 
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/work/common"
+	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/common"
 )
 
-var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-work-client"), func() {
+var _ = Describe("SourceWorkClient", Ordered, Label("e2e-tests-source-work-client"), func() {
 	Context("Update an obsolete work", func() {
 		var workName string
 
 		BeforeEach(func() {
 			workName = "work-" + rand.String(5)
 			work := NewManifestWork(workName)
-			Eventually(func() error {
-				_, err := sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Create(ctx, work, metav1.CreateOptions{})
-				return err
-			}, 2*time.Minute, 2*time.Second).ShouldNot(HaveOccurred())
+			_, err := sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Create(ctx, work, metav1.CreateOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
 
 			// wait for few seconds to ensure the creation is finished
 			<-time.After(5 * time.Second)
@@ -51,7 +49,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 
 		})
 
-		It("Should return an error when updating an obsolete work", func() {
+		It("should return error when updating an obsolete work", func() {
 			By("update a work by work client")
 			work, err := sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Get(ctx, workName, metav1.GetOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
@@ -79,7 +77,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 		})
 	})
 
-	Context("Watch work status with gRPC source ManifestWork client", func() {
+	Context("Watch work status with source work client", func() {
 		var watcherCtx context.Context
 		var watcherCancel context.CancelFunc
 
@@ -120,22 +118,22 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			watcherCancel()
 		})
 
-		It("The work status should be watched", func() {
-			By("create a work client for watch")
+		It("the work status should be watched", func() {
+			By("create a work watcher client")
 			watcherClient, err := grpcsource.NewMaestroGRPCSourceWorkClient(
-				watcherCtx,
+				ctx,
 				apiClient,
 				grpcOptions,
 				sourceID,
 			)
 			Expect(err).ShouldNot(HaveOccurred())
 
-			By("start watching")
+			By("start status watching")
 			watcher, err := watcherClient.ManifestWorks(agentTestOpts.consumerName).Watch(watcherCtx, metav1.ListOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
 			result := StartWatch(watcherCtx, watcher)
 
-			By("create a work by work client")
+			By("create a work with source work client")
 			workName := "work-" + rand.String(5)
 			_, err = sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Create(ctx, NewManifestWork(workName), metav1.CreateOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
@@ -143,7 +141,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			// wait for few seconds to ensure the creation is finished
 			<-time.After(5 * time.Second)
 
-			By("update a work by work client")
+			By("update a work with source work client")
 			work, err := sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Get(ctx, workName, metav1.GetOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
 
@@ -158,7 +156,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			// wait for few seconds to ensure the work status is updated by agent
 			<-time.After(5 * time.Second)
 
-			By("delete the work by work client")
+			By("delete the work with source work client")
 			err = sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Delete(ctx, workName, metav1.DeleteOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
 
@@ -167,9 +165,9 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			}, 1*time.Minute, 1*time.Second).ShouldNot(HaveOccurred())
 		})
 
-		It("The watchers with different namespace", func() {
+		It("the watchers for different namespace", func() {
 			watcherClient, err := grpcsource.NewMaestroGRPCSourceWorkClient(
-				watcherCtx,
+				ctx,
 				apiClient,
 				grpcOptions,
 				sourceID,
@@ -191,7 +189,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			Expect(err).ShouldNot(HaveOccurred())
 			otherConsumerWatcherResult := StartWatch(watcherCtx, otherConsumerWatcher)
 
-			By("create a work by work client")
+			By("create a work with source work client")
 			workName := "work-" + rand.String(5)
 			_, err = sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Create(ctx, NewManifestWork(workName), metav1.CreateOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
@@ -199,7 +197,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			// wait for few seconds to ensure the creation is finished
 			<-time.After(5 * time.Second)
 
-			By("delete the work by work client")
+			By("delete the work with source work client")
 			err = sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Delete(ctx, workName, metav1.DeleteOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
 
@@ -219,23 +217,23 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			}, 10*time.Second, 1*time.Second).ShouldNot(HaveOccurred())
 		})
 
-		It("The watchers with label selector", func() {
+		It("the watchers with label selector", func() {
 			watcherClient, err := grpcsource.NewMaestroGRPCSourceWorkClient(
-				watcherCtx,
+				ctx,
 				apiClient,
 				grpcOptions,
 				sourceID,
 			)
 			Expect(err).ShouldNot(HaveOccurred())
 
-			By("start watching with label app=test")
+			By("start watching with label")
 			watcher, err := watcherClient.ManifestWorks(agentTestOpts.consumerName).Watch(watcherCtx, metav1.ListOptions{
 				LabelSelector: "app=test",
 			})
 			Expect(err).ShouldNot(HaveOccurred())
 			result := StartWatch(watcherCtx, watcher)
 
-			By("create a work by work client")
+			By("create a work with source work client")
 			workName := "work-" + rand.String(5)
 			work := NewManifestWorkWithLabels(workName, map[string]string{"app": "test"})
 			_, err = sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Create(ctx, work, metav1.CreateOptions{})
@@ -244,7 +242,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			// wait for few seconds to ensure the creation is finished
 			<-time.After(5 * time.Second)
 
-			By("delete the work by work client")
+			By("delete the work with source work client")
 			err = sourceWorkClient.ManifestWorks(agentTestOpts.consumerName).Delete(ctx, workName, metav1.DeleteOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
 
@@ -254,7 +252,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 		})
 	})
 
-	Context("List works with gRPC source ManifestWork client", func() {
+	Context("List works with source work client", func() {
 		var workName string
 		var prodWorkName string
 		var testWorkAName string
@@ -329,7 +327,7 @@ var _ = Describe("Source ManifestWork Client", Ordered, Label("e2e-tests-source-
 			}, 2*time.Minute, 2*time.Second).ShouldNot(HaveOccurred())
 		})
 
-		It("List works with options", func() {
+		It("list works with options", func() {
 			By("list all works")
 			works, err := sourceWorkClient.ManifestWorks(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
@@ -441,17 +439,26 @@ func AssertWatchResult(result *WatchedResult) error {
 	for _, watchedWork := range result.WatchedWorks {
 		if strings.HasPrefix(watchedWork.Name, "init-work-a") && !watchedWork.CreationTimestamp.IsZero() {
 			hasFirstInitWork = true
+			if err := ensureObservedGeneration(watchedWork); err != nil {
+				return err
+			}
 		}
 
 		if strings.HasPrefix(watchedWork.Name, "init-work-b") && !watchedWork.CreationTimestamp.IsZero() {
 			hasSecondInitWork = true
+			if err := ensureObservedGeneration(watchedWork); err != nil {
+				return err
+			}
 		}
 
 		if strings.HasPrefix(watchedWork.Name, "work-") && !watchedWork.CreationTimestamp.IsZero() {
 			hasWork = true
+			if err := ensureObservedGeneration(watchedWork); err != nil {
+				return err
+			}
 		}
 
-		if meta.IsStatusConditionTrue(watchedWork.Status.Conditions, common.ManifestsDeleted) && !watchedWork.DeletionTimestamp.IsZero() {
+		if meta.IsStatusConditionTrue(watchedWork.Status.Conditions, common.ResourceDeleted) && !watchedWork.DeletionTimestamp.IsZero() {
 			if len(watchedWork.Spec.Workload.Manifests) == 0 {
 				return fmt.Errorf("expected the deleted work has spec, but failed %v", watchedWork.Spec)
 			}
@@ -553,4 +560,19 @@ func NewManifest(name string) workv1.Manifest {
 	manifest := workv1.Manifest{}
 	manifest.Raw = objectStr
 	return manifest
+}
+
+func ensureObservedGeneration(work *workv1.ManifestWork) error {
+	if meta.IsStatusConditionTrue(work.Status.Conditions, common.ResourceDeleted) {
+		return nil
+	}
+
+	for _, cond := range work.Status.Conditions {
+		if cond.ObservedGeneration == 0 {
+			return fmt.Errorf("unexpected observed generation %d for work %s",
+				cond.ObservedGeneration, work.Name)
+		}
+	}
+
+	return nil
 }

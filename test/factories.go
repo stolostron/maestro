@@ -11,7 +11,6 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/openshift-online/maestro/pkg/api"
-	"github.com/openshift-online/maestro/pkg/api/openapi"
 	"github.com/openshift-online/maestro/pkg/db"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
@@ -27,11 +26,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	workv1 "open-cluster-management.io/api/work/v1"
+	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/payload"
 	cetypes "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
-	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/work/payload"
 )
 
-var testManifestJSON = `
+var manifestJSON = `
 {
 	"apiVersion": "apps/v1",
 	"kind": "Deployment",
@@ -66,111 +65,11 @@ var testManifestJSON = `
 }
 `
 
-var testReadOnlyManifestJSON = `
-{
-	"apiVersion": "apps/v1",
-	"kind": "Deployment",
-	"metadata": {
-	  "name": "%s",
-	  "namespace": "%s"
-	}
-}
-`
-
-// NewAPIResource creates an API resource with the given consumer name, deploy name, and replicas.
-// It generates a deployment for nginx using the testManifestJSON template, giving it a random deploy
-// name to avoid testing conflicts.
-func (helper *Helper) NewAPIResource(consumerName, deployName string, replicas int) openapi.Resource {
-	sa := "default" // default service account
-	return helper.NewAPIResourceWithSA(consumerName, deployName, sa, replicas)
-}
-
-// NewAPIResourceWithSA creates an API resource with the given consumer name, deploy name, service account, and replicas.
-// It generates a nginx deployment using the testManifestJSON template, assigning a random deploy name to avoid testing conflicts.
-func (helper *Helper) NewAPIResourceWithSA(consumerName, deployName, sa string, replicas int) openapi.Resource {
+// NewManifestJSON creates a resource manifest in JSON format with the given deploy name and replicas.
+// It generates a deployment for nginx using the manifestJSON template, assigning a random deploy name to avoid conflicts.
+func (helper *Helper) NewManifestJSON(deployName, serviceAccount string, replicas int) string {
 	namespace := "default" // default namespace
-	testManifest := map[string]interface{}{}
-	if err := json.Unmarshal([]byte(fmt.Sprintf(testManifestJSON, deployName, namespace, replicas, sa)), &testManifest); err != nil {
-		helper.T.Errorf("error unmarshalling manifest: %q", err)
-	}
-
-	return openapi.Resource{
-		Manifest:     testManifest,
-		ConsumerName: &consumerName,
-	}
-}
-
-// NewResourceManifestJSON creates a resource manifest in JSON format with the given deploy name and replicas.
-// It generates a deployment for nginx using the testManifestJSON template, assigning a random deploy name to avoid
-// testing conflicts.
-func (helper *Helper) NewResourceManifestJSON(deployName string, replicas int) string {
-	namespace := "default" // default namespace
-	sa := "default"        // default service account
-	return fmt.Sprintf(testManifestJSON, deployName, namespace, replicas, sa)
-}
-
-// NewReadOnlyAPIResource creates an API resource with the given consumer name and deploy name.
-// It generates a read-only deployment manifests for nginx using the testReadOnlyManifestJSON template,
-// giving it a random deploy name to avoid testing conflicts.
-func (helper *Helper) NewReadOnlyAPIResource(consumerName, deployName string) openapi.Resource {
-	namespace := "default" // default namespace
-	testManifest := map[string]interface{}{}
-	if err := json.Unmarshal([]byte(fmt.Sprintf(testReadOnlyManifestJSON, deployName, namespace)), &testManifest); err != nil {
-		helper.T.Errorf("error unmarshalling test manifest: %q", err)
-	}
-
-	return openapi.Resource{
-		Manifest:     testManifest,
-		ConsumerName: &consumerName,
-		UpdateStrategy: map[string]interface{}{
-			"type": "ReadOnly",
-		},
-	}
-}
-
-// NewReadOnlyResourceManifestJSON creates a resource with the given consumer name, deploy name, replicas, and resource version.
-// It generates a deployment for nginx using the testManifestJSON template, assigning a random deploy name to avoid testing conflicts.
-func (helper *Helper) NewResource(consumerName, deployName string, replicas int, resourceVersion int32) *api.Resource {
-	testResource := helper.NewAPIResource(consumerName, deployName, replicas)
-	testPayload, err := api.EncodeManifest(testResource.Manifest, testResource.DeleteOption, testResource.UpdateStrategy)
-	if err != nil {
-		helper.T.Errorf("error encoding manifest: %q", err)
-	}
-
-	resource := &api.Resource{
-		ConsumerName: consumerName,
-		Type:         api.ResourceTypeSingle,
-		Payload:      testPayload,
-		Version:      resourceVersion,
-	}
-
-	return resource
-}
-
-// CreateResource creates a resource with the given consumer name, deploy name, and replicas.
-// It generates a deployment for nginx using the testManifestJSON template, assigning a random deploy name to avoid testing conflicts.
-func (helper *Helper) CreateResource(consumerName, deployName string, replicas int) *api.Resource {
-	resource := helper.NewResource(consumerName, deployName, replicas, 1)
-	resourceService := helper.Env().Services.Resources()
-
-	res, err := resourceService.Create(context.Background(), resource)
-	if err != nil {
-		helper.T.Errorf("error creating resource: %q", err)
-	}
-
-	return res
-}
-
-// CreateResourceList generates a list of resources with the specified consumer name and count.
-// Each resource gets a randomly generated deploy name for nginx deployments to avoid testing conflicts.
-func (helper *Helper) CreateResourceList(consumerName string, count int) (resources []*api.Resource) {
-	for i := 1; i <= count; i++ {
-		deployName := fmt.Sprintf("nginx-%s", rand.String(5))
-		resources = append(resources, helper.CreateResource(consumerName, deployName, 1))
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	return resources
+	return fmt.Sprintf(manifestJSON, deployName, namespace, replicas, serviceAccount)
 }
 
 // EncodeManifestBundle converts resource manifest JSON into a CloudEvent JSONMap representation.
@@ -196,7 +95,7 @@ func (helper *Helper) EncodeManifestBundle(manifestJSON, deployName, deployNames
 	}
 
 	source := "maestro"
-	// create a cloud event with the manifest as the data
+	// create a cloud event with the manifest bundle as the data
 	evt := cetypes.NewEventBuilder(source, cetypes.CloudEventsType{}).NewEvent()
 	eventPayload := &workpayload.ManifestBundle{
 		Manifests: []workv1.Manifest{
@@ -239,151 +138,174 @@ func (helper *Helper) EncodeManifestBundle(manifestJSON, deployName, deployNames
 	// convert cloudevent to JSONMap
 	manifestBundle, err := api.CloudEventToJSONMap(&evt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert cloudevent to resource manifest: %v", err)
+		return nil, fmt.Errorf("failed to convert cloudevent to resource manifest bundle: %v", err)
 	}
 
 	return manifestBundle, nil
 }
 
-// NewResourceBundle creates a resource bundle with the given consumer name, deploy name, replicas, and resource version.
-func (helper *Helper) NewResourceBundle(consumerName, deployName string, replicas int, resourceVersion int32) *api.Resource {
+// NewResource creates a resource with the given consumer name, deploy name, replicas, and resource version.
+func (helper *Helper) NewResource(consumerName, deployName, serviceAccount string, replicas int, resourceVersion int32) (*api.Resource, error) {
 	namespace := "default" // default namespace
-	manifestJSON := helper.NewResourceManifestJSON(deployName, replicas)
+	manifestJSON := helper.NewManifestJSON(deployName, serviceAccount, replicas)
 	payload, err := helper.EncodeManifestBundle(manifestJSON, deployName, namespace)
 	if err != nil {
-		helper.T.Errorf("error encoding manifest bundle: %q", err)
+		return nil, err
 	}
 
 	resource := &api.Resource{
 		ConsumerName: consumerName,
-		Type:         api.ResourceTypeBundle,
 		Payload:      payload,
 		Version:      resourceVersion,
 	}
 
-	return resource
+	return resource, nil
 }
 
-// CreateResourceBundle creates a resource bundle with the given consumer name, deploy name and replicas.
-// It generates a deployment for nginx using the testManifestJSON template, assigning a random deploy name to avoid testing conflicts.
-func (helper *Helper) CreateResourceBundle(consumerName, deployName string, replicas int) *api.Resource {
-	resourceBundle := helper.NewResourceBundle(consumerName, deployName, replicas, 1)
-	resourceService := helper.Env().Services.Resources()
-
-	res, err := resourceService.Create(context.Background(), resourceBundle)
+// CreateResource creates a resource with the given consumer name, deploy name and replicas.
+// It generates a deployment for nginx using the manifestJSON template, assigning a random deploy name to avoid conflicts.
+func (helper *Helper) CreateResource(consumerName, deployName, serviceAccount string, replicas int) (*api.Resource, error) {
+	resource, err := helper.NewResource(consumerName, deployName, serviceAccount, replicas, 1)
 	if err != nil {
-		helper.T.Errorf("error creating resource bundle: %q", err)
+		return nil, err
+	}
+	resourceService := helper.Env().Services.Resources()
+	res, svcErr := resourceService.Create(context.Background(), resource)
+	if svcErr != nil {
+		return nil, svcErr.AsError()
 	}
 
-	return res
+	return res, nil
 }
 
-// CreateResourceBundleList generates a list of resource bundles with the specified consumer name and count.
-// Each resource gets a randomly generated deploy name for nginx deployments to avoid testing conflicts.
-func (helper *Helper) CreateResourceBundleList(consumerName string, count int) (resourceBundles []*api.Resource) {
-	for i := 1; i <= count; i++ {
+// UpdateResource attempts to update a resource, resource ID must not be empty.
+func (helper *Helper) UpdateResource(resource *api.Resource) (*api.Resource, error) {
+	resourceService := helper.Env().Services.Resources()
+	res, err := resourceService.Update(context.Background(), resource)
+	if err != nil {
+		return nil, err.AsError()
+	}
+
+	return res, nil
+}
+
+// CreateResourceList generates a list of resources with the specified consumer name and count.
+// Each resource gets a randomly generated deploy name for nginx deployments to avoid conflicts.
+func (helper *Helper) CreateResourceList(consumerName string, count int) ([]*api.Resource, error) {
+	resources := make([]*api.Resource, count)
+	for i := 0; i < count; i++ {
 		deployName := fmt.Sprintf("nginx-%s", rand.String(5))
-		resourceBundles = append(resourceBundles, helper.CreateResourceBundle(consumerName, deployName, 1))
+		resource, err := helper.CreateResource(consumerName, deployName, "default", 1)
+		if err != nil {
+			return resources, err
+		}
+		resources[i] = resource
 	}
 
-	return resourceBundles
+	return resources, nil
 }
 
-func (helper *Helper) CreateConsumer(name string) *api.Consumer {
+// DeleteResource attempts to delete a resource and returns an error if it fails.
+func (helper *Helper) DeleteResource(id string) error {
+	resourceService := helper.Env().Services.Resources()
+	if err := resourceService.MarkAsDeleting(context.Background(), id); err != nil {
+		return err.AsError()
+	}
+
+	return nil
+}
+
+// NewManifest creats a manifest with the given deploy name and replicas.
+// It generates a deployment for nginx using the manifestJSON template, assigning random
+// deploy name to avoid conflicts.
+func (helper *Helper) NewManifest(deployName, serviceAccount string, replicas int) workv1.Manifest {
+	manifestJSON := helper.NewManifestJSON(deployName, serviceAccount, replicas)
+	return workv1.Manifest{
+		RawExtension: runtime.RawExtension{
+			Raw: []byte(manifestJSON),
+		},
+	}
+}
+
+// NewManifestWork creates a manifestwork with the given manifestwork name, deploy name and replicas.
+// It generates a deployment for nginx using the manifestJSON template, assigning random manifestwork name
+// and deploy name to avoid conflicts.
+func (helper *Helper) NewManifestWork(workName, deployName, serviceAccount string, replicas int) *workv1.ManifestWork {
+	manifest := helper.NewManifest(deployName, serviceAccount, replicas)
+	return &workv1.ManifestWork{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: workName,
+		},
+		Spec: workv1.ManifestWorkSpec{
+			Workload: workv1.ManifestsTemplate{
+				Manifests: []workv1.Manifest{manifest},
+			},
+			ManifestConfigs: []workv1.ManifestConfigOption{
+				{
+					ResourceIdentifier: workv1.ResourceIdentifier{
+						Group:     "apps",
+						Resource:  "deployments",
+						Name:      deployName,
+						Namespace: "default",
+					},
+					FeedbackRules: []workv1.FeedbackRule{
+						{
+							Type: workv1.JSONPathsType,
+							JsonPaths: []workv1.JsonPath{
+								{
+									Name: "status",
+									Path: ".status",
+								},
+							},
+						},
+					},
+					UpdateStrategy: &workv1.UpdateStrategy{
+						Type: workv1.UpdateStrategyTypeServerSideApply,
+					},
+				},
+			},
+		},
+	}
+
+}
+
+func (helper *Helper) CreateConsumer(name string) (*api.Consumer, error) {
 	return helper.CreateConsumerWithLabels(name, nil)
 }
 
-func (helper *Helper) CreateConsumerWithLabels(name string, labels map[string]string) *api.Consumer {
+func (helper *Helper) CreateConsumerWithLabels(name string, labels map[string]string) (*api.Consumer, error) {
 	consumerService := helper.Env().Services.Consumers()
 
 	consumer, err := consumerService.Create(context.Background(), &api.Consumer{Name: name, Labels: db.EmptyMapToNilStringMap(&labels)})
 	if err != nil {
-		helper.T.Errorf("error creating consumer: %q", err)
-	}
-	return consumer
-}
-
-func (helper *Helper) CreateConsumerList(count int) (consumers []*api.Consumer) {
-	for i := 1; i <= count; i++ {
-		consumers = append(consumers, helper.CreateConsumer(fmt.Sprintf("consumer-%d", i)))
+		return nil, err
 	}
 
-	return consumers
+	return consumer, nil
 }
 
-// NewEvent creates a CloudEvent with the given source, action, consumer name, resource ID, deploy name, resource version, and replicas.
-// It generates a nginx deployment using the testManifestJSON template, assigning a random deploy name to avoid testing conflicts.
+func (helper *Helper) CreateConsumerList(count int) ([]*api.Consumer, error) {
+	consumers := make([]*api.Consumer, count)
+	for i := 0; i < count; i++ {
+		consumer, err := helper.CreateConsumer(fmt.Sprintf("consumer-%d", i))
+		if err != nil {
+			return consumers, err
+		}
+		consumers[i] = consumer
+	}
+
+	return consumers, nil
+}
+
+// NewEvent creates a CloudEvent with the given source, action, consumer name, resource ID, deployment name, resource version, and replicas.
+// It generates a nginx deployment using the manifestJSON template, assigning a random deploy name to avoid conflicts.
 // If the action is "delete_request," the event includes a deletion timestamp.
-func (helper *Helper) NewEvent(source, action, consumerName, resourceID, deployName string, resourceVersion int64, replicas int) *cloudevents.Event {
+func (helper *Helper) NewEvent(source, action, consumerName, resourceID, deployName string, resourceVersion int64, replicas int) (*cloudevents.Event, error) {
 	sa := "default"              // default service account
 	deployNamespace := "default" // default namespace
-	testManifest := map[string]interface{}{}
-	if err := json.Unmarshal([]byte(fmt.Sprintf(testManifestJSON, deployName, deployNamespace, replicas, sa)), &testManifest); err != nil {
-		helper.T.Errorf("error unmarshalling manifest: %q", err)
-	}
-
-	eventType := cetypes.CloudEventsType{
-		CloudEventsDataType: workpayload.ManifestEventDataType,
-		SubResource:         cetypes.SubResourceSpec,
-		Action:              cetypes.EventAction(action),
-	}
-	evtBuilder := cetypes.NewEventBuilder(source, eventType).
-		WithClusterName(consumerName).
-		WithResourceID(resourceID).
-		WithResourceVersion(resourceVersion)
-
-	// add deletion timestamp if action is delete_request
-	if action == "delete_request" {
-		evtBuilder.WithDeletionTimestamp(time.Now())
-	}
-
-	evt := evtBuilder.NewEvent()
-
-	// if action is delete_request, no data is needed
-	if action == "delete_request" {
-		evt.SetData(cloudevents.ApplicationJSON, nil)
-		return &evt
-	}
-
-	eventPayload := &workpayload.Manifest{
-		Manifest: unstructured.Unstructured{Object: testManifest},
-		DeleteOption: &workv1.DeleteOption{
-			PropagationPolicy: workv1.DeletePropagationPolicyTypeForeground,
-		},
-		ConfigOption: &workpayload.ManifestConfigOption{
-			FeedbackRules: []workv1.FeedbackRule{
-				{
-					Type: workv1.JSONPathsType,
-					JsonPaths: []workv1.JsonPath{
-						{
-							Name: "status",
-							Path: ".status",
-						},
-					},
-				},
-			},
-			UpdateStrategy: &workv1.UpdateStrategy{
-				Type: workv1.UpdateStrategyTypeServerSideApply,
-			},
-		},
-	}
-
-	if err := evt.SetData(cloudevents.ApplicationJSON, eventPayload); err != nil {
-		helper.T.Errorf("failed to set cloud event data: %q", err)
-	}
-
-	return &evt
-}
-
-// NewBundleEvent creates a CloudEvent with the given source, action, consumer name, resource ID, resource version, and replicas.
-// It generates a bundle of nginx deployments using the testManifestJSON template, assigning a random deploy name to avoid testing conflicts.
-// If the action is "delete_request," the event includes a deletion timestamp.
-func (helper *Helper) NewBundleEvent(source, action, consumerName, resourceID, deployName string, resourceVersion int64, replicas int) *cloudevents.Event {
-	sa := "default"              // default service account
-	deployNamespace := "default" // default namespace
-	testManifest := map[string]interface{}{}
-	if err := json.Unmarshal([]byte(fmt.Sprintf(testManifestJSON, deployName, deployNamespace, replicas, sa)), &testManifest); err != nil {
-		helper.T.Errorf("error unmarshalling manifest: %q", err)
+	manifest := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(fmt.Sprintf(manifestJSON, deployName, deployNamespace, replicas, sa)), &manifest); err != nil {
+		return nil, err
 	}
 
 	eventType := cetypes.CloudEventsType{
@@ -408,14 +330,14 @@ func (helper *Helper) NewBundleEvent(source, action, consumerName, resourceID, d
 	// if action is delete_request, no data is needed
 	if action == "delete_request" {
 		evt.SetData(cloudevents.ApplicationJSON, nil)
-		return &evt
+		return &evt, nil
 	}
 
 	eventPayload := &workpayload.ManifestBundle{
 		Manifests: []workv1.Manifest{
 			{
 				RawExtension: runtime.RawExtension{
-					Object: &unstructured.Unstructured{Object: testManifest},
+					Object: &unstructured.Unstructured{Object: manifest},
 				},
 			},
 		},
@@ -449,10 +371,10 @@ func (helper *Helper) NewBundleEvent(source, action, consumerName, resourceID, d
 	}
 
 	if err := evt.SetData(cloudevents.ApplicationJSON, eventPayload); err != nil {
-		helper.T.Errorf("failed to set cloud event data: %q", err)
+		return nil, err
 	}
 
-	return &evt
+	return &evt, nil
 }
 
 func (helper *Helper) CreateGRPCAuthRule(ctx context.Context, kubeClient kubernetes.Interface, ruleName, resourceType, resourceID string, actions []string) error {
@@ -499,8 +421,8 @@ func (helper *Helper) CreateGRPCAuthRule(ctx context.Context, kubeClient kuberne
 	return err
 }
 
-func (helper *Helper) CreateGRPCConn(serverAddr, serverCAFile, tokenFile string) (*grpc.ClientConn, error) {
-	if serverCAFile == "" || tokenFile == "" {
+func (helper *Helper) CreateGRPCConn(serverAddr, serverCAFile, token string) (*grpc.ClientConn, error) {
+	if serverCAFile == "" || token == "" {
 		// no TLS and authz
 		return grpc.Dial(serverAddr, grpc.WithInsecure())
 	} else {
@@ -523,11 +445,6 @@ func (helper *Helper) CreateGRPCConn(serverAddr, serverCAFile, tokenFile string)
 			RootCAs:    certPool,
 			MinVersion: tls.VersionTLS13,
 			MaxVersion: tls.VersionTLS13,
-		}
-
-		token, err := os.ReadFile(tokenFile)
-		if err != nil {
-			return nil, err
 		}
 
 		perRPCCred := oauth.TokenSource{

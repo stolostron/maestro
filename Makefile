@@ -50,17 +50,20 @@ db_user:=maestro
 db_password:=foobar-bizz-buzz
 db_password_file=${PWD}/secrets/db.password
 db_sslmode:=disable
-db_image?=docker.io/library/postgres:14.2
+db_image?=quay.io/maestro/postgres:17.2
 
 # Message broker connection details
-mqtt_host=maestro-mqtt.$(namespace)
-mqtt_port=1883
-mqtt_user:=maestro
-mqtt_password_file=${PWD}/secrets/mqtt.password
-mqtt_config_file=${PWD}/secrets/mqtt.config
+mqtt_host ?= maestro-mqtt.$(namespace)
+mqtt_port ?= 1883
+mqtt_user ?= maestro
+mqtt_password_file ?= ${PWD}/secrets/mqtt.password
+mqtt_config_file ?= ${PWD}/secrets/mqtt.config
+mqtt_root_cert ?= ""
+mqtt_client_cert ?= ""
+mqtt_client_key ?= ""
 
 # Log verbosity level
-klog_v:=10
+klog_v:=4
 
 # Location of the JSON web key set used to verify tokens:
 jwks_url:=https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
@@ -76,7 +79,7 @@ CLIENT_SECRET ?= maestro
 ENABLE_JWT ?= true
 ENABLE_AUTHZ ?= true
 ENABLE_OCM_MOCK ?= false
-ENABLE_GRPC_SERVER ?= false
+ENABLE_GRPC_SERVER ?= true
 
 # message driver type, mqtt or grpc, default is mqtt.
 MESSAGE_DRIVER_TYPE ?= mqtt
@@ -85,12 +88,27 @@ MESSAGE_DRIVER_TYPE ?= mqtt
 SERVER_REPLICAS ?= 1
 
 # Enable set images
-POSTGRES_IMAGE ?= docker.io/library/postgres:14.2
-MQTT_IMAGE ?= docker.io/library/eclipse-mosquitto:2.0.18
+POSTGRES_IMAGE ?= quay.io/maestro/postgres:17.2
+MQTT_IMAGE ?= quay.io/maestro/eclipse-mosquitto:2.0.18
 
 # Test output files
 unit_test_json_output ?= ${PWD}/unit-test-results.json
-integration_test_json_output ?= ${PWD}/integration-test-results.json
+mqtt_integration_test_json_output ?= ${PWD}/mqtt-integration-test-results.json
+grpc_integration_test_json_output ?= ${PWD}/grpc-integration-test-results.json
+
+# maestro services config
+maestro_svc_type ?= ClusterIP
+maestro_svc_node_port ?= 0
+grpc_svc_type ?= ClusterIP
+grpc_svc_node_port ?= 0
+
+# maestro deployment config
+liveness_probe_init_delay_seconds ?= 15
+readiness_probe_init_delay_seconds ?= 20
+
+# subscription config
+subscription_type ?= shared
+agent_topic ?= "\$$share/statussubscribers/sources/maestro/consumers/+/agentevents"
 
 # Prints a list of useful targets.
 help:
@@ -117,7 +135,7 @@ help:
 
 # Encourage consistent tool versions
 OPENAPI_GENERATOR_VERSION:=5.4.0
-GO_VERSION:=go1.22.
+GO_VERSION:=go1.23.
 
 ### Constants:
 version:=$(shell date +%s)
@@ -126,11 +144,11 @@ GOLANGCI_LINT_BIN:=$(shell go env GOPATH)/bin/golangci-lint
 ### Envrionment-sourced variables with defaults
 # Can be overriden by setting environment var before running
 # Example:
-#   OCM_ENV=testing make run
-#   export OCM_ENV=testing; make run
+#   MAESTRO_ENV=testing make run
+#   export MAESTRO_ENV=testing; make run
 # Set the environment to development by default
-ifndef OCM_ENV
-	OCM_ENV:=development
+ifndef MAESTRO_ENV
+	MAESTRO_ENV:=development
 endif
 
 ifndef TEST_SUMMARY_FORMAT
@@ -203,7 +221,7 @@ install: check-gopath
 # Examples:
 #   make test TESTFLAGS="-run TestSomething"
 test:
-	OCM_ENV=testing gotestsum --jsonfile-timing-events=$(unit_test_json_output) --format $(TEST_SUMMARY_FORMAT) -- -p 1 -v $(TESTFLAGS) \
+	MAESTRO_ENV=testing gotestsum --jsonfile-timing-events=$(unit_test_json_output) --format $(TEST_SUMMARY_FORMAT) -- -p 1 -v $(TESTFLAGS) \
 		./pkg/... \
 		./cmd/...
 .PHONY: test
@@ -218,10 +236,18 @@ test:
 #   make test-integration TESTFLAGS="-run TestAccounts"     acts as TestAccounts* and run TestAccountsGet, TestAccountsPost, etc.
 #   make test-integration TESTFLAGS="-run TestAccountsGet"  runs TestAccountsGet
 #   make test-integration TESTFLAGS="-short"                skips long-run tests
-test-integration:
-	OCM_ENV=testing gotestsum --jsonfile-timing-events=$(integration_test_json_output) --format $(TEST_SUMMARY_FORMAT) -- -p 1 -ldflags -s -v -timeout 1h $(TESTFLAGS) \
-			./test/integration
+test-integration: test-integration-mqtt test-integration-grpc
 .PHONY: test-integration
+
+test-integration-mqtt:
+	BROKER=mqtt MAESTRO_ENV=testing gotestsum --jsonfile-timing-events=$(mqtt_integration_test_json_output) --format $(TEST_SUMMARY_FORMAT) -- -p 1 -ldflags -s -v -timeout 1h $(TESTFLAGS) \
+			./test/integration
+.PHONY: test-integration-mqtt
+
+test-integration-grpc:
+	BROKER=grpc MAESTRO_ENV=testing gotestsum --jsonfile-timing-events=$(grpc_integration_test_json_output) --format $(TEST_SUMMARY_FORMAT) -- -p 1 -ldflags -s -v -timeout 1h $(TESTFLAGS) \
+			./test/integration
+.PHONY: test-integration-grpc
 
 # Regenerate openapi client and models
 generate:
@@ -269,7 +295,7 @@ cmds:
 		--filename="templates/$*-template.yml" \
 		--local="true" \
 		--ignore-unknown-parameters="true" \
-		--param="ENVIRONMENT=$(OCM_ENV)" \
+		--param="ENVIRONMENT=$(MAESTRO_ENV)" \
 		--param="KLOG_V=$(klog_v)" \
 		--param="SERVER_REPLICAS=$(SERVER_REPLICAS)" \
 		--param="DATABASE_HOST=$(db_host)" \
@@ -283,9 +309,9 @@ cmds:
 		--param="MQTT_PORT=$(mqtt_port)" \
 		--param="MQTT_USER=$(mqtt_user)" \
 		--param="MQTT_PASSWORD=$(shell cat $(mqtt_password_file))" \
-		--param="MQTT_ROOT_CERT=" \
-		--param="MQTT_CLIENT_CERT=" \
-		--param="MQTT_CLIENT_KEY=" \
+		--param="MQTT_ROOT_CERT=$(mqtt_root_cert)" \
+		--param="MQTT_CLIENT_CERT=$(mqtt_client_cert)" \
+		--param="MQTT_CLIENT_KEY=$(mqtt_client_key)" \
 		--param="MQTT_IMAGE=$(MQTT_IMAGE)" \
 		--param="IMAGE_REGISTRY=$(internal_image_registry)" \
 		--param="IMAGE_REPOSITORY=$(image_repository)" \
@@ -309,6 +335,14 @@ cmds:
 		--param="ENABLE_OCM_MOCK=$(ENABLE_OCM_MOCK)" \
 		--param="ENABLE_GRPC_SERVER=$(ENABLE_GRPC_SERVER)" \
 		--param="MESSAGE_DRIVER_TYPE"=$(MESSAGE_DRIVER_TYPE) \
+		--param="MAESTRO_SVC_TYPE"=$(maestro_svc_type) \
+		--param="MAESTRO_SVC_NODE_PORT"=$(maestro_svc_node_port) \
+		--param="GRPC_SVC_TYPE"=$(grpc_svc_type) \
+		--param="GRPC_SVC_NODE_PORT"=$(grpc_svc_node_port) \
+		--param="LIVENESS_PROBE_INIT_DELAY_SECONDS"=$(liveness_probe_init_delay_seconds) \
+		--param="READINESS_PROBE_INIT_DELAY_SECONDS"=$(readiness_probe_init_delay_seconds) \
+		--param="SUBSCRIPTION_TYPE"=$(subscription_type) \
+		--param="AGENT_TOPIC"=$(agent_topic) \
 	> "templates/$*-template.json"
 
 
@@ -417,7 +451,7 @@ e2e-test/teardown:
 	./test/e2e/setup/e2e_teardown.sh
 .PHONY: e2e-test/teardown
 
-e2e-test: e2e-test/teardown e2e-test/setup
+e2e-test/run:
 	ginkgo -v --fail-fast --label-filter="!(e2e-tests-spec-resync-reconnect||e2e-tests-status-resync-reconnect)" \
 	--output-dir="${PWD}/test/e2e/report" --json-report=report.json --junit-report=report.xml \
 	${PWD}/test/e2e/pkg -- \
@@ -426,4 +460,11 @@ e2e-test: e2e-test/teardown e2e-test/setup
 	-server-kubeconfig=${PWD}/test/e2e/.kubeconfig \
 	-consumer-name=$(shell cat ${PWD}/test/e2e/.consumer_name) \
 	-agent-kubeconfig=${PWD}/test/e2e/.kubeconfig
+.PHONY: e2e-test/run
+
+e2e-test: e2e-test/teardown e2e-test/setup e2e-test/run
 .PHONY: e2e-test
+
+migration-test: e2e-test/teardown
+	./test/e2e/migration/test.sh
+.PHONY: migration-test

@@ -13,10 +13,13 @@ import (
 	"github.com/openshift-online/maestro/pkg/client/cloudevents"
 	"github.com/openshift-online/maestro/pkg/config"
 	"github.com/openshift-online/maestro/pkg/dao"
+	"github.com/openshift-online/maestro/pkg/db"
 	"github.com/openshift-online/maestro/pkg/logger"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
 )
+
+var log = logger.GetLogger()
 
 var _ Dispatcher = &HashDispatcher{}
 
@@ -24,29 +27,34 @@ var _ Dispatcher = &HashDispatcher{}
 // Only the maestro instance that is mapped to a consumer will process the resource status update from that consumer.
 // Need to trigger status resync for the consumer when an instance is up or down.
 type HashDispatcher struct {
-	instanceID   string
-	instanceDao  dao.InstanceDao
-	consumerDao  dao.ConsumerDao
-	sourceClient cloudevents.SourceClient
-	consumerSet  mapset.Set[string]
-	workQueue    workqueue.RateLimitingInterface
-	consistent   *consistent.Consistent
+	instanceID             string
+	sessionFactory         db.SessionFactory
+	instanceDao            dao.InstanceDao
+	consumerDao            dao.ConsumerDao
+	sourceClient           cloudevents.SourceClient
+	consumerSet            mapset.Set[string]
+	workQueue              workqueue.RateLimitingInterface
+	consistent             *consistent.Consistent
+	updateHashRingInterval time.Duration
 }
 
-func NewHashDispatcher(instanceID string, instanceDao dao.InstanceDao, consumerDao dao.ConsumerDao, sourceClient cloudevents.SourceClient, consistentHashingConfig *config.ConsistentHashConfig) *HashDispatcher {
+func NewHashDispatcher(instanceID string, sessionFactory db.SessionFactory, sourceClient cloudevents.SourceClient,
+	consistentHashingConfig *config.ConsistentHashConfig, interval time.Duration) *HashDispatcher {
 	return &HashDispatcher{
-		instanceID:   instanceID,
-		instanceDao:  instanceDao,
-		consumerDao:  consumerDao,
-		sourceClient: sourceClient,
-		consumerSet:  mapset.NewSet[string](),
-		workQueue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "hash-dispatcher"),
+		instanceID:     instanceID,
+		sessionFactory: sessionFactory,
+		instanceDao:    dao.NewInstanceDao(&sessionFactory),
+		consumerDao:    dao.NewConsumerDao(&sessionFactory),
+		sourceClient:   sourceClient,
+		consumerSet:    mapset.NewSet[string](),
+		workQueue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "hash-dispatcher"),
 		consistent: consistent.New(nil, consistent.Config{
 			PartitionCount:    consistentHashingConfig.PartitionCount,
 			ReplicationFactor: consistentHashingConfig.ReplicationFactor,
 			Load:              consistentHashingConfig.Load,
 			Hasher:            hasher{},
 		}),
+		updateHashRingInterval: interval,
 	}
 }
 
@@ -56,7 +64,7 @@ func (d *HashDispatcher) Start(ctx context.Context) {
 	go d.startStatusResyncWorkers(ctx)
 
 	// start a goroutine to periodically check the instances and consumers.
-	go wait.UntilWithContext(ctx, d.check, 5*time.Second)
+	go wait.UntilWithContext(ctx, d.check, d.updateHashRingInterval)
 
 	// start a goroutine to resync current consumers for this source when the client is reconnected
 	go d.resyncOnReconnect(ctx)
@@ -68,7 +76,6 @@ func (d *HashDispatcher) Start(ctx context.Context) {
 
 // resyncOnReconnect listens for the client reconnected signal and resyncs current consumers for this source.
 func (d *HashDispatcher) resyncOnReconnect(ctx context.Context) {
-	log := logger.NewOCMLogger(ctx)
 	// receive client reconnect signal and resync current consumers for this source
 	for {
 		select {
@@ -90,65 +97,17 @@ func (d *HashDispatcher) Dispatch(consumerName string) bool {
 	return d.consumerSet.Contains(consumerName)
 }
 
-// OnInstanceUp adds the new instance to the hashing ring and updates the consumer set for the current instance.
-func (d *HashDispatcher) OnInstanceUp(instanceID string) error {
-	members := d.consistent.GetMembers()
-	for _, member := range members {
-		if member.String() == instanceID {
-			// instance already exists, hashing ring won't be changed
-			return nil
-		}
-	}
-
-	// add the new instance to the hashing ring
-	d.consistent.Add(&api.ServerInstance{
-		Meta: api.Meta{
-			ID: instanceID,
-		},
-	})
-
-	return d.updateConsumerSet()
-}
-
-// OnInstanceDown removes the instance from the hashing ring and updates the consumer set for the current instance.
-func (d *HashDispatcher) OnInstanceDown(instanceID string) error {
-	members := d.consistent.GetMembers()
-	deletedMember := true
-	for _, member := range members {
-		if member.String() == instanceID {
-			// the instance is still in the hashing ring
-			deletedMember = false
-			break
-		}
-	}
-
-	// if the instance is already deleted, the hash ring won't be changed
-	if deletedMember {
-		return nil
-	}
-
-	// remove the instance from the hashing ring
-	d.consistent.Remove(instanceID)
-
-	return d.updateConsumerSet()
-}
-
 // updateConsumerSet updates the consumer set for the current instance based on the hashing ring.
 func (d *HashDispatcher) updateConsumerSet() error {
 	// return if the hashing ring is not ready
 	if d.consistent == nil || len(d.consistent.GetMembers()) == 0 {
 		return nil
 	}
-
-	ctx := context.TODO()
-	log := logger.NewOCMLogger(ctx)
-
 	// get all consumers and update the consumer set for the current instance
-	consumers, err := d.consumerDao.All(ctx)
+	consumers, err := d.consumerDao.All(context.TODO())
 	if err != nil {
 		return fmt.Errorf("unable to list consumers: %s", err.Error())
 	}
-
 	toAddConsumers, toRemoveConsumers := []string{}, []string{}
 	for _, consumer := range consumers {
 		instanceID := d.consistent.LocateKey([]byte(consumer.Name)).String()
@@ -168,8 +127,9 @@ func (d *HashDispatcher) updateConsumerSet() error {
 
 	_ = d.consumerSet.Append(toAddConsumers...)
 	d.consumerSet.RemoveAll(toRemoveConsumers...)
-	log.V(4).Infof("Consumers set for current instance: %s", d.consumerSet.String())
-
+	if len(toAddConsumers) != 0 || len(toRemoveConsumers) != 0 {
+		log.Debugf("Consumers set for current instance: %s", d.consumerSet.String())
+	}
 	return nil
 }
 
@@ -190,29 +150,53 @@ func (d *HashDispatcher) startStatusResyncWorkers(ctx context.Context) {
 
 // check checks the instances & consumers and updates the hashing ring and consumer set for the current instance.
 func (d *HashDispatcher) check(ctx context.Context) {
-	log := logger.NewOCMLogger(ctx)
-
 	instances, err := d.instanceDao.All(ctx)
 	if err != nil {
 		log.Error(fmt.Sprintf("Unable to get all maestro instances: %s", err.Error()))
 		return
 	}
 
-	// ensure the hashing ring members are up-to-date
-	members := d.consistent.GetMembers()
-	for _, member := range members {
-		isMemberActive := false
-		for _, instance := range instances {
-			if member.String() == instance.ID {
-				isMemberActive = true
-				break
-			}
-		}
-		if !isMemberActive {
-			d.consistent.Remove(member.String())
+	// get all ready instances from DB directly
+	readyInstances := []string{}
+	for _, instance := range instances {
+		if instance.Ready {
+			readyInstances = append(readyInstances, instance.ID)
 		}
 	}
 
+	// get all existing ready instances which are added into the hash ring
+	existingInstances := []string{}
+	members := d.consistent.GetMembers()
+	for _, member := range members {
+		existingInstances = append(existingInstances, member.String())
+	}
+
+	setA := mapset.NewSet(readyInstances...)
+	setB := mapset.NewSet(existingInstances...)
+	// Compare to get added and removed instances
+	addedMembers := setA.Difference(setB)
+	removedMembers := setB.Difference(setA)
+
+	// if there are newly added members, need to put them into the hash ring
+	for _, member := range addedMembers.ToSlice() {
+		d.consistent.Add(&api.ServerInstance{
+			Meta: api.Meta{
+				ID: member,
+			},
+		})
+	}
+
+	// if there are removed members, need to remove them from the hash ring
+	for _, member := range removedMembers.ToSlice() {
+		d.consistent.Remove(member)
+	}
+
+	if !addedMembers.IsEmpty() || !removedMembers.IsEmpty() {
+		log.Debugf("newly added server instances are %s and removed server instances are %s from the hash ring",
+			addedMembers.String(), removedMembers.String())
+	}
+
+	// need update consumerset always to ensure the consumers are located to specified server instance
 	if err := d.updateConsumerSet(); err != nil {
 		log.Error(fmt.Sprintf("Unable to update consumer set: %s", err.Error()))
 	}
@@ -242,8 +226,7 @@ func (d *HashDispatcher) processNextResync(ctx context.Context) bool {
 		return true
 	}
 
-	log := logger.NewOCMLogger(ctx)
-	log.V(4).Infof("processing status resync request for consumer %s", consumerName)
+	log.Infof("processing status resync request for consumer %s", consumerName)
 	if err := d.sourceClient.Resync(ctx, []string{consumerName}); err != nil {
 		log.Error(fmt.Sprintf("failed to resync resourcs status for consumer %s: %s", consumerName, err))
 		// Put the item back on the workqueue to handle any transient errors.

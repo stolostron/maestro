@@ -7,14 +7,12 @@ import (
 	"github.com/openshift-online/maestro/pkg/controllers"
 	"github.com/openshift-online/maestro/pkg/dao"
 	"github.com/openshift-online/maestro/pkg/db"
-
-	"github.com/openshift-online/maestro/pkg/logger"
 )
 
-func NewControllersServer(eventServer EventServer) *ControllersServer {
+func NewControllersServer(eventServer EventServer, eventFilter controllers.EventFilter) *ControllersServer {
 	s := &ControllersServer{
 		KindControllerManager: controllers.NewKindControllerManager(
-			db.NewAdvisoryLockFactory(env().Database.SessionFactory),
+			eventFilter,
 			env().Services.Events(),
 		),
 		StatusController: controllers.NewStatusController(
@@ -50,8 +48,6 @@ type ControllersServer struct {
 
 // Start is a blocking call that starts this controller server
 func (s ControllersServer) Start(ctx context.Context) {
-	log := logger.NewOCMLogger(ctx)
-
 	log.Infof("Kind controller handling events")
 	go s.KindControllerManager.Run(ctx.Done())
 	log.Infof("Status controller handling events")

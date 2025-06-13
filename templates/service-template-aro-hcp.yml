@@ -5,7 +5,7 @@ metadata:
   name: maestro-service
   annotations:
     openshift.io/display-name: maestro
-    description: Example Service API for the Unified Hybrid Cloud deployment
+    description: Example for Maestro ARO deployment
     tags: golang,uhc,service-delivery
     iconClass: icon-shadowman
     template.openshift.io/provider-display-name: Red Hat, Inc.
@@ -16,7 +16,7 @@ parameters:
 
 - name: ENVIRONMENT
   displayName: Environment
-  description: Which Account Manager environment to use for this deployment
+  description: Which maestro environment to use for this deployment
   value: production
 
 - name: IMAGE_REGISTRY
@@ -38,7 +38,7 @@ parameters:
 - name: KLOG_V
   displayName: KLOG V Level
   description: Log verbosity level
-  value: "10"
+  value: "4"
 
 - name: MEMORY_REQUEST
   description: Memory request for the API pods.
@@ -188,6 +188,10 @@ objects:
         spec:
           serviceAccountName: maestro
           volumes:
+          - name: logging-config
+            configMap:
+              name: maestro-logging-config
+              optional: true
           - name: db
             secret:
               secretName: ${DB_SECRET_NAME}
@@ -223,6 +227,8 @@ objects:
             image: ${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_TAG}
             imagePullPolicy: IfNotPresent
             volumeMounts:
+            - name: logging-config
+              mountPath: /configs/logging
             - name: db
               mountPath: /secrets/db
             - name: mqtt
@@ -231,7 +237,7 @@ objects:
               mountPath: /secrets/mqtt-creds
               readOnly: true
             env:
-              - name: "AMS_ENV"
+              - name: "MAESTRO_ENV"
                 value: "${ENVIRONMENT}"
               - name: POD_NAME
                 valueFrom:

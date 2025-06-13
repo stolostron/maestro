@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lib/pq"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-	"k8s.io/klog/v2"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/openshift-online/maestro/pkg/config"
 	"github.com/openshift-online/maestro/pkg/db"
+	"github.com/openshift-online/maestro/pkg/logger"
 )
+
+var log = logger.GetLogger()
 
 type Test struct {
 	config *config.DatabaseConfig
@@ -51,12 +54,12 @@ func (f *Test) Init(config *config.DatabaseConfig) {
 	// Only the first time
 	once.Do(func() {
 		if err := initDatabase(config, db.Migrate); err != nil {
-			klog.Errorf("error initializing test database: %s", err)
+			log.Errorf("error initializing test database: %s", err)
 			return
 		}
 
 		if err := resetDB(config); err != nil {
-			klog.Errorf("error resetting test database: %s", err)
+			log.Errorf("error resetting test database: %s", err)
 			return
 		}
 	})
@@ -128,7 +131,7 @@ func connect(name string, config *config.DatabaseConfig) (*sql.DB, *gorm.DB, fun
 		PrepareStmt:            false,
 		FullSaveAssociations:   false,
 		SkipDefaultTransaction: true,
-		Logger:                 logger.Default.LogMode(logger.Silent),
+		Logger:                 gormlogger.Default.LogMode(gormlogger.Silent),
 	}
 	g2, err = gorm.Open(postgres.New(postgres.Config{
 		Conn: dbx,
@@ -192,7 +195,7 @@ func (f *Test) New(ctx context.Context) *gorm.DB {
 
 	conn := f.g2.Session(&gorm.Session{
 		Context: ctx,
-		Logger:  f.g2.Logger.LogMode(logger.Silent),
+		Logger:  f.g2.Logger.LogMode(gormlogger.Silent),
 	})
 	if f.config.Debug {
 		conn = conn.Debug()
@@ -215,6 +218,8 @@ func (f *Test) ResetDB() {
 	f.wasDisconnected = true
 }
 
-func (f *Test) NewListener(ctx context.Context, channel string, callback func(id string)) {
-	newListener(ctx, f.config, channel, callback)
+func (f *Test) NewListener(ctx context.Context, channel string, callback func(id string)) *pq.Listener {
+	listener := newListener(ctx, f.config, channel)
+	go waitForNotification(ctx, listener, f.config, channel, callback)
+	return listener
 }

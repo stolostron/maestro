@@ -38,6 +38,13 @@ var MigrationList = []*gormigrate.Migration{
 	alterEventInstances(),
 }
 
+// CleanUpDirtyData clean up the dirty data before migrating the tables.
+// Note: when new constraints will be added to old tables, we should especially consider the possibility of dirty data.
+func CleanUpDirtyData(db *gorm.DB) error {
+	//TODO: cleanup dirty data before add new constraints to old tables
+	return nil
+}
+
 // Model represents the base model struct. All entities will have this struct embedded.
 type Model struct {
 	ID        string `gorm:"primary_key"`

@@ -12,7 +12,6 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
-	"k8s.io/klog/v2"
 )
 
 // Context key type defined to avoid collisions in other pkgs using context
@@ -101,15 +100,18 @@ func newAuthUnaryInterceptor(authNType string, authorizer grpcauthorizer.GRPCAut
 		case "token":
 			user, groups, err = identityFromToken(ctx, authorizer)
 			if err != nil {
-				klog.Errorf("unable to get user and groups from token: %v", err)
+				log.Errorf("unable to get user and groups from token: %v", err)
 				return nil, err
 			}
 		case "mtls":
 			user, groups, err = identityFromCertificate(ctx)
 			if err != nil {
-				klog.Errorf("unable to get user and groups from certificate: %v", err)
+				log.Errorf("unable to get user and groups from certificate: %v", err)
 				return nil, err
 			}
+		case "mock":
+			user = "mock"
+			groups = []string{"mock-group"}
 		default:
 			return nil, fmt.Errorf("unsupported authentication type %s", authNType)
 		}
@@ -156,15 +158,18 @@ func newAuthStreamInterceptor(authNType string, authorizer grpcauthorizer.GRPCAu
 		case "token":
 			user, groups, err = identityFromToken(ss.Context(), authorizer)
 			if err != nil {
-				klog.Errorf("unable to get user and groups from token: %v", err)
+				log.Errorf("unable to get user and groups from token: %v", err)
 				return err
 			}
 		case "mtls":
 			user, groups, err = identityFromCertificate(ss.Context())
 			if err != nil {
-				klog.Errorf("unable to get user and groups from certificate: %v", err)
+				log.Errorf("unable to get user and groups from certificate: %v", err)
 				return err
 			}
+		case "mock":
+			user = "mock"
+			groups = []string{"mock-group"}
 		default:
 			return fmt.Errorf("unsupported authentication Type %s", authNType)
 		}

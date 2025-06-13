@@ -2,20 +2,26 @@ package servecmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
-	"k8s.io/klog/v2"
 
+	"github.com/openshift-online/maestro/cmd/maestro/common"
 	"github.com/openshift-online/maestro/cmd/maestro/environments"
 	"github.com/openshift-online/maestro/cmd/maestro/server"
 	"github.com/openshift-online/maestro/pkg/config"
-	"github.com/openshift-online/maestro/pkg/dao"
+	"github.com/openshift-online/maestro/pkg/controllers"
+	"github.com/openshift-online/maestro/pkg/db"
 	"github.com/openshift-online/maestro/pkg/dispatcher"
 	"github.com/openshift-online/maestro/pkg/event"
+	"github.com/openshift-online/maestro/pkg/logger"
 )
+
+var log = logger.GetLogger()
 
 func NewServerCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -26,7 +32,7 @@ func NewServerCommand() *cobra.Command {
 	}
 	err := environments.Environment().AddFlags(cmd.PersistentFlags())
 	if err != nil {
-		klog.Fatalf("Unable to add environment flags to serve command: %s", err.Error())
+		log.Fatalf("Unable to add environment flags to serve command: %s", err.Error())
 	}
 
 	return cmd
@@ -35,10 +41,8 @@ func NewServerCommand() *cobra.Command {
 func runServer(cmd *cobra.Command, args []string) {
 	err := environments.Environment().Initialize()
 	if err != nil {
-		klog.Fatalf("Unable to initialize environment: %s", err.Error())
+		log.Fatalf("Unable to initialize environment: %s", err.Error())
 	}
-
-	healthcheckServer := server.NewHealthCheckServer()
 
 	// Create event broadcaster to broadcast resource status update events to subscribers
 	eventBroadcaster := event.NewEventBroadcaster()
@@ -47,34 +51,44 @@ func runServer(cmd *cobra.Command, args []string) {
 	// For gRPC, create a gRPC broker to handle resource spec and status events.
 	// For MQTT/Kafka, create a message queue based event server to handle resource spec and status events.
 	var eventServer server.EventServer
+	var eventFilter controllers.EventFilter
 	if environments.Environment().Config.MessageBroker.MessageBrokerType == "grpc" {
-		klog.Info("Setting up grpc broker")
+		log.Info("Setting up grpc broker")
 		eventServer = server.NewGRPCBroker(eventBroadcaster)
+		eventFilter = controllers.NewPredicatedEventFilter(eventServer.PredicateEvent)
 	} else {
-		klog.Info("Setting up message queue event server")
+		log.Info("Setting up message queue event server")
 		var statusDispatcher dispatcher.Dispatcher
 		subscriptionType := environments.Environment().Config.EventServer.SubscriptionType
 		switch config.SubscriptionType(subscriptionType) {
 		case config.SharedSubscriptionType:
-			statusDispatcher = dispatcher.NewNoopDispatcher(dao.NewConsumerDao(&environments.Environment().Database.SessionFactory), environments.Environment().Clients.CloudEventsSource)
+			statusDispatcher = dispatcher.NewNoopDispatcher(environments.Environment().Database.SessionFactory, environments.Environment().Clients.CloudEventsSource)
 		case config.BroadcastSubscriptionType:
-			statusDispatcher = dispatcher.NewHashDispatcher(environments.Environment().Config.MessageBroker.ClientID, dao.NewInstanceDao(&environments.Environment().Database.SessionFactory),
-				dao.NewConsumerDao(&environments.Environment().Database.SessionFactory), environments.Environment().Clients.CloudEventsSource, environments.Environment().Config.EventServer.ConsistentHashConfig)
+			statusDispatcher = dispatcher.NewHashDispatcher(environments.Environment().Config.MessageBroker.ClientID, environments.Environment().Database.SessionFactory,
+				environments.Environment().Clients.CloudEventsSource, environments.Environment().Config.EventServer.ConsistentHashConfig, 5*time.Second)
 		default:
-			klog.Errorf("Unsupported subscription type: %s", subscriptionType)
+			log.Errorf("Unsupported subscription type: %s", subscriptionType)
 		}
-
-		// Set the status dispatcher for the healthcheck server
-		healthcheckServer.SetStatusDispatcher(statusDispatcher)
 		eventServer = server.NewMessageQueueEventServer(eventBroadcaster, statusDispatcher)
+		eventFilter = controllers.NewLockBasedEventFilter(db.NewAdvisoryLockFactory(environments.Environment().Database.SessionFactory))
 	}
 
 	// Create the servers
 	apiserver := server.NewAPIServer(eventBroadcaster)
 	metricsServer := server.NewMetricsServer()
-	controllersServer := server.NewControllersServer(eventServer)
+	healthcheckServer := server.NewHealthCheckServer()
+	controllersServer := server.NewControllersServer(eventServer, eventFilter)
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	tracingShutdown := func(context.Context) error { return nil }
+	if common.TracingEnabled() {
+		tracingShutdown, err = common.InstallOpenTelemetryTracer(ctx, log)
+		if err != nil {
+			log.Errorf("Can't initialize OpenTelemetry trace provider: %v", err)
+			os.Exit(1)
+		}
+	}
 
 	stopCh := make(chan os.Signal, 1)
 	signal.Notify(stopCh, syscall.SIGINT, syscall.SIGTERM)
@@ -83,11 +97,15 @@ func runServer(cmd *cobra.Command, args []string) {
 		<-stopCh
 		// Received SIGTERM or SIGINT signal, shutting down servers gracefully.
 		if err := apiserver.Stop(); err != nil {
-			klog.Errorf("Failed to stop api server, %v", err)
+			log.Errorf("Failed to stop api server, %v", err)
 		}
 
 		if err := metricsServer.Stop(); err != nil {
-			klog.Errorf("Failed to stop metrics server, %v", err)
+			log.Errorf("Failed to stop metrics server, %v", err)
+		}
+
+		if tracingShutdown != nil && tracingShutdown(ctx) != nil {
+			log.Warnf(fmt.Sprintf("OpenTelemetry trace provider failed to shutdown: %v", err))
 		}
 	}()
 

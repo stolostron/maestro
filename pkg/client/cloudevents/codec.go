@@ -7,9 +7,9 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	cloudeventstypes "github.com/cloudevents/sdk-go/v2/types"
 	"github.com/google/uuid"
+	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/payload"
 	cegeneric "open-cluster-management.io/sdk-go/pkg/cloudevents/generic"
 	cetypes "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
-	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/work/payload"
 
 	"github.com/openshift-online/maestro/pkg/api"
 )
@@ -20,8 +20,14 @@ type Codec struct {
 
 var _ cegeneric.Codec[*api.Resource] = &Codec{}
 
+func NewCodec(sourceID string) *Codec {
+	return &Codec{
+		sourceID: sourceID,
+	}
+}
+
 func (codec *Codec) EventDataType() cetypes.CloudEventsDataType {
-	return workpayload.ManifestEventDataType
+	return workpayload.ManifestBundleEventDataType
 }
 
 func (codec *Codec) Encode(source string, eventType cetypes.CloudEventsType, res *api.Resource) (*cloudevents.Event, error) {
@@ -55,7 +61,7 @@ func (codec *Codec) Decode(evt *cloudevents.Event) (*api.Resource, error) {
 		return nil, fmt.Errorf("failed to parse cloud event type %s, %v", evt.Type(), err)
 	}
 
-	if eventType.CloudEventsDataType != workpayload.ManifestEventDataType {
+	if eventType.CloudEventsDataType != workpayload.ManifestBundleEventDataType {
 		return nil, fmt.Errorf("unsupported cloudevents data type %s", eventType.CloudEventsDataType)
 	}
 
@@ -96,7 +102,6 @@ func (codec *Codec) Decode(evt *cloudevents.Event) (*api.Resource, error) {
 		},
 		Version:      resourceVersion,
 		ConsumerName: clusterName,
-		Type:         api.ResourceTypeSingle,
 		Status:       status,
 	}
 

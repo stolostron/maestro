@@ -1,3 +1,5 @@
 package logging
 
-const LoggingThreshold int32 = 1
+import "github.com/openshift-online/maestro/pkg/logger"
+
+var log = logger.GetLogger()

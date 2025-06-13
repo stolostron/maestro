@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	_ "github.com/auth0/go-jwt-middleware"
 	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/ghodss/yaml"
@@ -15,8 +17,8 @@ import (
 	gorillahandlers "github.com/gorilla/handlers"
 	sdk "github.com/openshift-online/ocm-sdk-go"
 	"github.com/openshift-online/ocm-sdk-go/authentication"
-	"k8s.io/klog/v2"
 
+	"github.com/openshift-online/maestro/cmd/maestro/common"
 	"github.com/openshift-online/maestro/cmd/maestro/environments"
 	"github.com/openshift-online/maestro/data/generated/openapi"
 	"github.com/openshift-online/maestro/pkg/errors"
@@ -119,6 +121,15 @@ func NewAPIServer(eventBroadcaster *event.EventBroadcaster) Server {
 	)(mainHandler)
 
 	mainHandler = removeTrailingSlash(mainHandler)
+	if common.TracingEnabled() {
+		mainHandler = otelhttp.NewHandler(mainHandler, "maestro-api",
+			otelhttp.WithSpanNameFormatter(
+				func(operation string, r *http.Request) string {
+					return fmt.Sprintf("%s %s %s", operation, "HTTP", r.Method)
+				},
+			),
+		)
+	}
 
 	s.httpServer = &http.Server{
 		Addr:    env().Config.HTTPServer.Hostname + ":" + env().Config.HTTPServer.BindPort,
@@ -145,16 +156,16 @@ func (s apiServer) Serve(listener net.Listener) {
 		}
 
 		// Serve with TLS
-		klog.Infof("Serving with TLS at %s", env().Config.HTTPServer.BindPort)
+		log.Infof("Serving with TLS at %s", env().Config.HTTPServer.BindPort)
 		err = s.httpServer.ServeTLS(listener, env().Config.HTTPServer.HTTPSCertFile, env().Config.HTTPServer.HTTPSKeyFile)
 	} else {
-		klog.Infof("Serving without TLS at %s", env().Config.HTTPServer.BindPort)
+		log.Infof("Serving without TLS at %s", env().Config.HTTPServer.BindPort)
 		err = s.httpServer.Serve(listener)
 	}
 
 	// Web server terminated.
 	check(err, "Web server terminated with errors")
-	klog.Info("Web server terminated")
+	log.Info("Web server terminated")
 }
 
 // Listen only start the listener, not the server.
@@ -174,7 +185,7 @@ func (s apiServer) Start() {
 
 	listener, err := s.Listen()
 	if err != nil {
-		klog.Fatalf("Unable to start API server: %s", err)
+		log.Fatalf("Unable to start API server: %s", err)
 	}
 	s.Serve(listener)
 
