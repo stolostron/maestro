@@ -23,12 +23,13 @@ COPY --from=builder /maestro/maestro /usr/local/bin/
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/maestro", "server"]
 
-LABEL name="maestro" \
+LABEL name="multicluster-engine/maestro-rhel9" \
+      cpe="cpe:/a:redhat:multicluster_engine:2.17::el9" \
+      com.redhat.component="maestro" \
       vendor="Red Hat, Inc." \
-      version="0.0.1" \
-      summary="maestro API" \
-      description="maestro API" \
-      io.k8s.description="maestro API" \
+      summary="Maestro server for multi-cluster resource management" \
+      description="Maestro server leverages CloudEvents to transport Kubernetes resources to target clusters and collect status updates via REST and gRPC APIs" \
+      io.k8s.description="Maestro server leverages CloudEvents to transport Kubernetes resources to target clusters and collect status updates via REST and gRPC APIs" \
       io.k8s.display-name="maestro" \
       io.openshift.tags="maestro"
 
