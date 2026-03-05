@@ -13,8 +13,6 @@ RUN make binary BUILD_OPTS="-tags strictfipsruntime -ldflags \"-X k8s.io/compone
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
-RUN microdnf update -y && microdnf install -y util-linux && microdnf clean all
-
 # Pass GIT Commit to the container for maestro server
 ARG GIT_COMMIT
 ENV GIT_COMMIT=${GIT_COMMIT}
