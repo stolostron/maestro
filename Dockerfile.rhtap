@@ -18,6 +18,9 @@ ARG GIT_COMMIT
 ENV GIT_COMMIT=${GIT_COMMIT}
 
 COPY --from=builder /maestro/maestro /usr/local/bin/
+
+USER 10001
+
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/maestro", "server"]
 
