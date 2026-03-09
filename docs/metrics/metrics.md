@@ -209,6 +209,85 @@ resource_processed_total{action="update",id="4bd1408d-36f2-51a8-87aa-76d63dfd1d4
 
 ---
 
+### `resource_first_status_latency_seconds`
+
+**Type:** `histogram`\
+**Help:** Time in seconds from resource creation to when the server first receives a status update from the agent. Represents agent responsiveness and network latency.
+
+This histogram tracks the latency between when a resource is created in the Maestro database and when the server first receives a status update from the agent. This metric is recorded in the event server's `HandleStatusUpdate` function, representing the agent's responsiveness and network latency. The metric is only recorded once per resource (on the first status transition from empty to non-empty).
+
+**Labels:**
+- `id` - The unique resource identifier
+- `consumer` - The consumer/cluster name where the resource is deployed
+- `source` - The source of the resource
+
+**Example:**
+
+```text
+# HELP resource_first_status_latency_seconds Time in seconds from resource creation to when the server first receives a status update from the agent. Represents agent responsiveness and network latency.
+# TYPE resource_first_status_latency_seconds histogram
+resource_first_status_latency_seconds_bucket{consumer="cluster-a",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",source="grpc",le="5"} 1
+resource_first_status_latency_seconds_bucket{consumer="cluster-a",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",source="grpc",le="30"} 1
+resource_first_status_latency_seconds_bucket{consumer="cluster-a",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",source="grpc",le="120"} 1
+resource_first_status_latency_seconds_bucket{consumer="cluster-a",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",source="grpc",le="600"} 1
+resource_first_status_latency_seconds_bucket{consumer="cluster-a",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",source="grpc",le="+Inf"} 1
+resource_first_status_latency_seconds_sum{consumer="cluster-a",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",source="grpc"} 5.123456
+resource_first_status_latency_seconds_count{consumer="cluster-a",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",source="grpc"} 1
+```
+
+**Common Queries:**
+
+```promql
+# P95 first status latency across all resources
+histogram_quantile(0.95, rate(resource_first_status_latency_seconds_bucket[5m]))
+
+# P95 first status latency by consumer
+histogram_quantile(0.95, sum by (consumer, le) (rate(resource_first_status_latency_seconds_bucket[5m])))
+
+# P95 first status latency by source
+histogram_quantile(0.95, sum by (source, le) (rate(resource_first_status_latency_seconds_bucket[5m])))
+
+# Average first status latency
+rate(resource_first_status_latency_seconds_sum[5m]) / rate(resource_first_status_latency_seconds_count[5m])
+```
+
+---
+
+### `resource_status_event_processing_latency_seconds`
+
+**Type:** `histogram`\
+**Help:** Latency in seconds from status event creation to it is processed by a server instance.
+
+This histogram tracks the time it takes for a status event to be processed by each Maestro server instance, measuring from when the status event is created in the database until the instance finishes broadcasting the status and recording the event instance. This metric is useful for monitoring status event processing latency across different server instances and identifying slow instances or broker-specific issues.
+
+**Labels:**
+- `id`: The resource ID
+- `consumer`: The consumer name (cluster) for the resource
+- `source`: The resource source
+- `server_instance_id`: The unique instance ID of the Maestro server that processed the event
+
+**Example:**
+
+```text
+# HELP resource_status_event_processing_latency_seconds Latency in seconds from status event creation to it is processed by a server instance.
+# TYPE resource_status_event_processing_latency_seconds histogram
+resource_status_event_processing_latency_seconds_bucket{consumer="cluster1",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",server_instance_id="maestro-server-1",source="grpc",le="0.05"} 1
+resource_status_event_processing_latency_seconds_bucket{consumer="cluster1",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",server_instance_id="maestro-server-1",source="grpc",le="0.1"} 1
+resource_status_event_processing_latency_seconds_bucket{consumer="cluster1",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",server_instance_id="maestro-server-1",source="grpc",le="0.5"} 1
+resource_status_event_processing_latency_seconds_bucket{consumer="cluster1",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",server_instance_id="maestro-server-1",source="grpc",le="1"} 1
+resource_status_event_processing_latency_seconds_bucket{consumer="cluster1",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",server_instance_id="maestro-server-1",source="grpc",le="5"} 1
+resource_status_event_processing_latency_seconds_bucket{consumer="cluster1",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",server_instance_id="maestro-server-1",source="grpc",le="+Inf"} 1
+resource_status_event_processing_latency_seconds_sum{consumer="cluster1",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",server_instance_id="maestro-server-1",source="grpc"} 0.018532
+resource_status_event_processing_latency_seconds_count{consumer="cluster1",id="2c74c9e5-dda7-5b74-a51c-c7a7114b44c3",server_instance_id="maestro-server-1",source="grpc"} 1
+```
+
+**Usage Tips:**
+- To estimate worst-case processing latency by resource ID: `histogram_quantile(0.99, sum(rate(resource_status_event_processing_latency_seconds_bucket[5m])) by (id, le))`
+- To identify slow instances: `histogram_quantile(0.99, sum(rate(resource_status_event_processing_latency_seconds_bucket[5m])) by (server_instance_id, le))`
+- To monitor overall status processing latency: `histogram_quantile(0.95, sum(rate(resource_status_event_processing_latency_seconds_bucket[5m])) by (le))`
+
+---
+
 ### `resources_spec_resync_duration_seconds`
 
 **Type:** `histogram`\

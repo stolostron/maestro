@@ -31,6 +31,7 @@ import (
 	"github.com/openshift-online/maestro/pkg/api"
 	"github.com/openshift-online/maestro/pkg/dao"
 	"github.com/openshift-online/maestro/pkg/errors"
+	"github.com/openshift-online/maestro/pkg/services"
 	"github.com/openshift-online/maestro/test"
 )
 
@@ -672,4 +673,201 @@ func createStatusWithSequenceID(t *testing.T, resourceID, sequenceID string) map
 	}
 
 	return statusMap
+}
+
+// TestFirstStatusLatencyMetric verifies that the first status latency metric
+// is collected when the server first receives a status update from the agent (in HandleStatusUpdate)
+func TestFirstStatusLatencyMetric(t *testing.T) {
+	h, _ := test.RegisterIntegration(t)
+
+	ctx := context.Background()
+
+	// Create a consumer and resource
+	consumer, err := h.CreateConsumer("cluster-" + rand.String(5))
+	Expect(err).NotTo(HaveOccurred())
+
+	deployName := fmt.Sprintf("nginx-%s", rand.String(5))
+	resource, err := h.CreateResource(uuid.NewString(), consumer.Name, deployName, "default", 1)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(resource.Version).To(Equal(int32(1)))
+	Expect(len(resource.Status)).To(Equal(0), "Initial resource should have no status")
+
+	resourceService := h.Env().Services.Resources()
+	statusEventService := h.Env().Services.StatusEvents()
+
+	// Update the resource with first status through HandleStatusUpdate to test the "received" metric
+	statusRes := &api.Resource{
+		Meta: api.Meta{
+			ID: resource.ID,
+		},
+		ConsumerName: consumer.Name,
+		Version:      resource.Version,
+		Status:       createStatusWithSequenceID(t, resource.ID, "1"),
+	}
+
+	// Call HandleStatusUpdate (this is where the "received" metric is recorded)
+	err = server.HandleStatusUpdate(ctx, statusRes, resourceService, statusEventService)
+	Expect(err).NotTo(HaveOccurred())
+
+	// Verify status was set
+	updatedRes, svcErr := resourceService.Get(ctx, resource.ID)
+	Expect(svcErr).NotTo(HaveOccurred())
+	Expect(len(updatedRes.Status)).ShouldNot(Equal(0), "Status should not be empty after update")
+
+	// Verify the "received" metric was recorded
+	metricFamily, err := prometheus.DefaultGatherer.Gather()
+	Expect(err).NotTo(HaveOccurred())
+
+	// Check for the metric
+	var foundReceived bool
+	var receivedObservationCount uint64
+	for _, mf := range metricFamily {
+		if *mf.Name == "resource_first_status_latency_seconds" {
+			for _, metric := range mf.Metric {
+				for _, label := range metric.Label {
+					if *label.Name == "id" && *label.Value == resource.ID {
+						foundReceived = true
+						if metric.Histogram != nil {
+							receivedObservationCount = *metric.Histogram.SampleCount
+						}
+						break
+					}
+				}
+				if foundReceived {
+					break
+				}
+			}
+		}
+		if foundReceived {
+			break
+		}
+	}
+
+	Expect(foundReceived).To(BeTrue(), "Received metric should be recorded for the resource")
+	Expect(receivedObservationCount).To(Equal(uint64(1)), "Received metric should have exactly 1 observation")
+
+	// Update status again - metric count should remain 1 (not incremented)
+	statusRes2 := &api.Resource{
+		Meta: api.Meta{
+			ID: updatedRes.ID,
+		},
+		ConsumerName: consumer.Name,
+		Version:      updatedRes.Version,
+		Status:       createStatusWithSequenceID(t, updatedRes.ID, "2"),
+	}
+
+	err = server.HandleStatusUpdate(ctx, statusRes2, resourceService, statusEventService)
+	Expect(err).NotTo(HaveOccurred())
+
+	// Verify metric count is still 1 (not incremented for subsequent updates)
+	metricFamily2, err := prometheus.DefaultGatherer.Gather()
+	Expect(err).NotTo(HaveOccurred())
+
+	var receivedObservationCount2 uint64
+	for _, mf := range metricFamily2 {
+		if *mf.Name == "resource_first_status_latency_seconds" {
+			for _, metric := range mf.Metric {
+				for _, label := range metric.Label {
+					if *label.Name == "id" && *label.Value == resource.ID {
+						if metric.Histogram != nil {
+							receivedObservationCount2 = *metric.Histogram.SampleCount
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	Expect(receivedObservationCount2).To(Equal(uint64(1)), "Received metric count should remain 1 after second status update")
+}
+
+func TestStatusEventProcessingLatencyMetric(t *testing.T) {
+	h, _ := test.RegisterIntegration(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create a consumer and resource
+	consumer, err := h.CreateConsumer("cluster-" + rand.String(5))
+	Expect(err).NotTo(HaveOccurred())
+	deployName := fmt.Sprintf("nginx-%s", rand.String(5))
+	resourceID := uuid.NewString()
+	resource, err := h.NewResource(resourceID, consumer.Name, deployName, "default", 1, 1)
+	Expect(err).NotTo(HaveOccurred())
+
+	// Set the source to match the controller configuration
+	resource.Source = "test"
+
+	resourceService := h.Env().Services.Resources()
+	resource, svcErr := resourceService.Create(context.Background(), resource)
+	Expect(svcErr).NotTo(HaveOccurred())
+
+	// Start the controller manager to handle status events
+	h.StartControllerManager(ctx)
+
+	// Give time for the database listener to be fully set up
+	time.Sleep(1 * time.Second)
+
+	// Reset metrics to avoid interference from other tests
+	services.ResetResourceMetrics()
+
+	// Create a status event directly to trigger the flow
+	statusEventDao := dao.NewStatusEventDao(&h.Env().Database.SessionFactory)
+	statusEvent := &api.StatusEvent{
+		ResourceID:      resource.ID,
+		ResourceSource:  resource.Source,
+		ResourceType:    resource.Type,
+		StatusEventType: api.StatusUpdateEventType,
+	}
+	statusEvent, err = statusEventDao.Create(ctx, statusEvent)
+	Expect(err).NotTo(HaveOccurred())
+
+	// Manually add the status event to the controller queue to ensure it's processed
+	// This is needed because the database listener might not have picked up the pg_notify yet
+	h.ControllerManager.StatusController.AddStatusEvent(statusEvent.ID)
+
+	// Verify the metric was recorded
+	// The metric should have been recorded with labels: id, consumer, source, server_instance_id
+	metricName := "resource_status_event_processing_latency_seconds"
+
+	// Wait for the status event to be processed and metric to be recorded
+	Eventually(func() error {
+		families, err := prometheus.DefaultGatherer.Gather()
+		if err != nil {
+			return err
+		}
+
+		for _, mf := range families {
+			if mf.GetName() == metricName {
+				for _, m := range mf.GetMetric() {
+					labels := m.GetLabel()
+					hasCorrectResourceID := false
+					hasCorrectConsumer := false
+					hasCorrectSource := false
+
+					for _, label := range labels {
+						if label.GetName() == "id" && label.GetValue() == resource.ID {
+							hasCorrectResourceID = true
+						}
+						if label.GetName() == "consumer" && label.GetValue() == consumer.Name {
+							hasCorrectConsumer = true
+						}
+						if label.GetName() == "source" && label.GetValue() == resource.Source {
+							hasCorrectSource = true
+						}
+					}
+
+					if hasCorrectResourceID && hasCorrectConsumer && hasCorrectSource {
+						// Verify that at least one observation was recorded
+						if m.Histogram != nil && m.Histogram.GetSampleCount() > 0 {
+							return nil
+						}
+						return fmt.Errorf("metric found with correct labels but no samples recorded")
+					}
+				}
+			}
+		}
+		return fmt.Errorf("metric %s not found with correct labels (id=%s, consumer=%s, source=%s)", metricName, resource.ID, consumer.Name, resource.Source)
+	}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
 }
