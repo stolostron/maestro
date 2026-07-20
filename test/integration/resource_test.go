@@ -22,7 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	workv1client "open-cluster-management.io/api/client/work/clientset/versioned/typed/work/v1"
 	workv1 "open-cluster-management.io/api/work/v1"
-	"open-cluster-management.io/sdk-go/pkg/cloudevents/clients/common"
 	workpayload "open-cluster-management.io/sdk-go/pkg/cloudevents/clients/work/payload"
 	cemetrics "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/metrics"
 	cetypes "open-cluster-management.io/sdk-go/pkg/cloudevents/generic/types"
@@ -396,31 +395,8 @@ func TestResourceFromGRPC(t *testing.T) {
 	}, newResource)
 	Expect(err).NotTo(HaveOccurred(), "Error publishing resource with grpc source client: %v", err)
 
-	Eventually(func() error {
-		// ensure the work can be get by work client
-		work, err = agentWorkClient.Get(ctx, newResource.ID, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if work.GetDeletionTimestamp() == nil {
-			return fmt.Errorf("work %s is not deleted", work.Name)
-		}
-		return nil
-	}, 10*time.Second, 1*time.Second).Should(Succeed())
-
-	// no real kubernete environment, so need to update the resource status manually
-	deletingWorkStatus := workv1.ManifestWorkStatus{
-		Conditions: []metav1.Condition{
-			{
-				Type:   common.ResourceDeleted,
-				Status: metav1.ConditionTrue,
-			},
-		},
-	}
-
-	// update the work status
-	Expect(updateWorkStatus(ctx, agentWorkClient, work, deletingWorkStatus)).NotTo(HaveOccurred())
-
+	// no real kube environment, so there is no finalizers, the work agent will delete this resource
+	// immediately
 	Eventually(func() error {
 		res, _, err = client.DefaultAPI.ApiMaestroV1ResourceBundlesIdGet(ctx, newResource.ID).Execute()
 		if res != nil {
@@ -494,6 +470,69 @@ func TestMarkAsDeletingThenUpdate(t *testing.T) {
 	res, err := resourceService.Get(ctx, resource.ID)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(len(res.Status)).ShouldNot(Equal(0))
+}
+
+// TestOnCreateDoesNotOrphanResourceMarkedAsDeleting is a regression test for ARO-28432: Maestro
+// server dropped a resource-bundle delete without ever propagating it to the agent, orphaning the
+// applied resource on the managed cluster.
+//
+// Root cause: SourceClientImpl.OnCreate (the handler invoked by the event controller when
+// processing a CreateEventType event) assumed that if the resource is already marked as deleting
+// (DeletedAt set) by the time its Create event is processed, the agent could never have received
+// it, and hard-deleted the resource from the database without notifying the agent. That assumption
+// is false whenever the Create event being processed is stale/retried (e.g. re-queued after a
+// transient publish failure) for a resource that was already delivered to, and is being actively
+// managed by, the agent through another path.
+//
+// This test reproduces the scenario directly against the real (test) EventServer and database:
+//  1. create a resource (Version=1)
+//  2. simulate the agent having already applied it and reported status back to maestro
+//  3. mark the resource as deleting (as the DELETE API handler would)
+//  4. invoke EventServer.OnCreate for the resource, simulating a stale/retried Create event being
+//     processed after the deletion was requested
+//
+// Before the fix, step 4 would hard-delete the resource (via ResourceService.Delete) with no
+// propagation to the agent. After the fix, OnCreate must skip and leave the resource soft-deleted,
+// so the Delete event handler can still propagate the delete_request to the agent.
+func TestOnCreateDoesNotOrphanResourceMarkedAsDeleting(t *testing.T) {
+	h, _ := test.RegisterIntegration(t)
+
+	ctx := context.Background()
+
+	consumer, err := h.CreateConsumer("cluster-" + rand.String(5))
+	Expect(err).NotTo(HaveOccurred())
+	deployName := fmt.Sprintf("nginx-%s", rand.String(5))
+	resource, err := h.CreateResource(uuid.NewString(), consumer.Name, deployName, "default", 1)
+	Expect(err).NotTo(HaveOccurred())
+
+	resourceService := h.Env().Services.Resources()
+
+	// Simulate the agent having already received and applied the resource, and reported status
+	// back to maestro, even though the Create event for it may not yet be marked reconciled.
+	statusRes := &api.Resource{
+		Meta:    api.Meta{ID: resource.ID},
+		Version: resource.Version,
+		Status:  createStatusWithSequenceID(t, resource.ID, "1"),
+	}
+	_, updated, svcErr := resourceService.UpdateStatus(ctx, statusRes)
+	Expect(svcErr).NotTo(HaveOccurred())
+	Expect(updated).Should(BeTrue())
+
+	// The user requests deletion before the (stale/retried) Create event is processed.
+	svcErr2 := resourceService.MarkAsDeleting(ctx, resource.ID)
+	Expect(svcErr2).NotTo(HaveOccurred())
+
+	// Simulate the event controller processing a stale/retried Create event for this resource.
+	Expect(h.EventServer.OnCreate(ctx, resource.ID)).To(Succeed())
+
+	// The resource must NOT have been hard-deleted: it must still exist, still marked as
+	// deleting, so the Delete event handler can propagate the delete_request to the agent.
+	res, svcErr3 := resourceService.Get(ctx, resource.ID)
+	Expect(svcErr3).NotTo(HaveOccurred())
+	Expect(res.DeletedAt.Valid).To(BeTrue(), "resource must remain (soft-deleted) so the delete can still be propagated to the agent")
+
+	// The Delete event handler must still be able to process the deletion normally afterwards.
+	Expect(h.EventServer.OnDelete(ctx, resource.ID)).To(Succeed())
 }
 
 func updateWorkStatus(ctx context.Context, workClient workv1client.ManifestWorkInterface, work *workv1.ManifestWork, newStatus workv1.ManifestWorkStatus) error {
