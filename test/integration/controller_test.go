@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -675,4 +678,159 @@ func TestMultipleControllers(t *testing.T) {
 		return nil
 	}, 10*time.Second, 1*time.Second).Should(Succeed())
 
+}
+
+func TestSpecEventAgeMetric(t *testing.T) {
+	h, _ := test.RegisterIntegration(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create an unreconciled event backdated two minutes
+	evt := &api.Event{
+		Meta: api.Meta{
+			CreatedAt: time.Now().Add(-2 * time.Minute),
+		},
+		Source:    "Resources",
+		SourceID:  uuid.NewString(),
+		EventType: api.CreateEventType,
+	}
+	err := h.Env().Database.SessionFactory.New(ctx).Transaction(func(tx *gorm.DB) error {
+		return tx.Omit(clause.Associations).Create(evt).Error
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventDao := dao.NewEventDao(&h.Env().Database.SessionFactory)
+	evt, err = eventDao.Get(ctx, evt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	Expect(time.Since(evt.CreatedAt).Seconds()).Should(BeNumerically(">=", 120))
+
+	// Start the controller. No handlers are registered so the event will remain unreconciled
+	go func() {
+		s := &server.ControllersServer{
+			KindControllerManager: controllers.NewKindControllerManager(
+				h.EventFilter,
+				h.Env().Services.Events(),
+			),
+			StatusController: controllers.NewStatusController(
+				h.Env().Services.StatusEvents(),
+				dao.NewInstanceDao(&h.Env().Database.SessionFactory),
+				dao.NewEventInstanceDao(&h.Env().Database.SessionFactory),
+			),
+		}
+		s.Start(ctx)
+	}()
+
+	// reportOldestEvent fires immediately on startup, so the age metric should be
+	// populated promptly
+	var age float64
+	Eventually(func() error {
+		families, err := prometheus.DefaultGatherer.Gather()
+		if err != nil {
+			return err
+		}
+		for _, mf := range families {
+			if mf.GetName() == "spec_controller_event_oldest_unreconciled_age_seconds" {
+				metrics := mf.GetMetric()
+				if len(metrics) == 0 {
+					return fmt.Errorf("metric has no samples yet")
+				}
+				age = metrics[0].GetGauge().GetValue()
+				if age == 0 {
+					return fmt.Errorf("metric sample is zero")
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("metric spec_controller_event_oldest_unreconciled_age_seconds not found")
+	}, 10*time.Second, 1*time.Second).Should(Succeed())
+	Expect(age).Should(BeNumerically(">=", 120))
+}
+
+func TestNotificationQueueUsageMetric(t *testing.T) {
+	h, _ := test.RegisterIntegration(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start a slow listener that deliberately delays notification consumption,
+	// causing notifications to accumulate in the postgres notification queue.
+	channel := "test_queue_usage_" + rand.String(5)
+	h.Env().Database.SessionFactory.NewListener(ctx, channel, func(id string) {
+		time.Sleep(100 * time.Second)
+	})
+
+	// Send NOTIFY's in a loop from a separate goroutine to fill the queue.
+	// The slow listener can only drain one notification every 10s, so the
+	// postgres NOTIFY queue usage will increase.
+	payload := strings.Repeat("x", 7000)
+	var mu sync.Mutex
+	var lastNotifyErr error
+	go func() {
+		notifyDB := h.Env().Database.SessionFactory.New(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				err := notifyDB.Exec("SELECT pg_notify(?, ?)", channel, payload).Error
+				mu.Lock()
+				lastNotifyErr = err
+				mu.Unlock()
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// Allow time for the notification queue to build up
+	time.Sleep(2 * time.Second)
+
+	// Start the StatusController, which calls reportNotificationQueueUsage on start
+	consumer, err := h.CreateConsumer("cluster-" + rand.String(5))
+	Expect(err).NotTo(HaveOccurred())
+	h.StartWorkAgent(ctx, consumer.Name)
+
+	go func() {
+		s := &server.ControllersServer{
+			KindControllerManager: controllers.NewKindControllerManager(
+				h.EventFilter,
+				h.Env().Services.Events(),
+			),
+			StatusController: controllers.NewStatusController(
+				h.Env().Services.StatusEvents(),
+				dao.NewInstanceDao(&h.Env().Database.SessionFactory),
+				dao.NewEventInstanceDao(&h.Env().Database.SessionFactory),
+			),
+		}
+		s.Start(ctx)
+	}()
+
+	// Wait for the metric to be reported with a value > 0, indicating
+	// that the notification queue has accumulated undelivered notifications.
+	metricName := "postgres_notification_queue_usage"
+	Eventually(func() error {
+		gathered, gatherErr := prometheus.DefaultGatherer.Gather()
+		if gatherErr != nil {
+			return gatherErr
+		}
+		for _, mf := range gathered {
+			if *mf.Name == metricName {
+				if len(mf.Metric) == 0 {
+					return fmt.Errorf("metric %s has no samples", metricName)
+				}
+				usage := mf.Metric[0].Gauge.GetValue()
+				if usage <= 0 {
+					return fmt.Errorf("metric %s value %f is not > 0", metricName, usage)
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("metric %s not found", metricName)
+	}, 10*time.Second, 1*time.Second).Should(Succeed(), func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return fmt.Sprintf("Last NOTIFY error: %v", lastNotifyErr)
+	})
 }

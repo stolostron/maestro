@@ -16,18 +16,18 @@ permissions:
 jobs:
   verify:
     name: verify
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: install Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: verify
         run: make verify
   e2e:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check initial disk usage
         run: df -h /
@@ -38,9 +38,9 @@ jobs:
           docker system prune -af
           df -h /
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: install ginkgo
@@ -57,13 +57,13 @@ jobs:
         run: ./test/e2e/scripts/collect_logs.sh /tmp/maestro-logs
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs
           path: /tmp/maestro-logs/
           retention-days: 7
   e2e-broadcast-subscription:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check initial disk usage
         run: df -h /
@@ -74,9 +74,9 @@ jobs:
           docker system prune -af
           df -h /
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: install ginkgo
@@ -93,13 +93,13 @@ jobs:
         run: ./test/e2e/scripts/collect_logs.sh /tmp/maestro-logs
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-broadcast-subscription-logs
           path: /tmp/maestro-logs/
           retention-days: 7
   e2e-with-istio:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check initial disk usage
         run: df -h /
@@ -110,9 +110,9 @@ jobs:
           docker system prune -af
           df -h /
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Test E2E
@@ -126,13 +126,13 @@ jobs:
         run: ./test/e2e/scripts/collect_logs.sh /tmp/maestro-logs
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-istio-logs
           path: /tmp/maestro-logs/
           retention-days: 7
   e2e-grpc-broker:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check initial disk usage
         run: df -h /
@@ -143,9 +143,9 @@ jobs:
           docker system prune -af
           df -h /
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: install ginkgo
@@ -163,13 +163,13 @@ jobs:
         run: ./test/e2e/scripts/collect_logs.sh /tmp/maestro-logs
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-grpc-broker-logs
           path: /tmp/maestro-logs/
           retention-days: 7
   e2e-pubsub:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check initial disk usage
         run: df -h /
@@ -180,9 +180,9 @@ jobs:
           docker system prune -af
           df -h /
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: install ginkgo
@@ -200,13 +200,13 @@ jobs:
         run: ./test/e2e/scripts/collect_logs.sh /tmp/maestro-logs
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-pubsub-logs
           path: /tmp/maestro-logs/
           retention-days: 7
   upgrade:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Check initial disk usage
         run: df -h /
@@ -217,9 +217,9 @@ jobs:
           docker system prune -af
           df -h /
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: install ginkgo
@@ -235,7 +235,7 @@ jobs:
         run: ./test/e2e/scripts/collect_logs.sh /tmp/maestro-logs
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: upgrade-logs
           path: /tmp/maestro-logs/
