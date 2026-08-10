@@ -34,8 +34,18 @@ jobs:
           # repo's default branch), on a dependency-update branch (created
           # by the swarm-deps-agent bot), are eligible for auto-merge. Also
           # require the PR to be mergeable and every non-tide check to have
-          # completed successfully (not just "at least one success" - a
-          # pending check must not count as passing).
+          # completed in a non-blocking state (not just "at least one
+          # success" - a pending or failed check must not count as passing).
+          #
+          # This repo's CI is Red Hat Konflux (reported via the GitHub
+          # Checks API, not GitHub Actions), and Konflux's
+          # enterprise-contract check legitimately completes with
+          # conclusion "NEUTRAL" (rather than "SUCCESS") for non-blocking
+          # release policies -- e.g. checks that are informational or not
+          # yet enforced. NEUTRAL is accepted here alongside SUCCESS since
+          # it is a terminal, non-failing conclusion; it is NOT the same as
+          # a pending/in-progress check, which reports no conclusion at all
+          # and therefore still fails this predicate as intended.
           base_branches=("backplane-5.0" "backplane-2.17")
           prs=""
           for base in "${base_branches[@]}"; do
@@ -46,7 +56,7 @@ jobs:
                 (.mergeable == "MERGEABLE") and
                 ([.statusCheckRollup[] | select(.context != "tide" and .name != "tide")] as $checks |
                   ($checks | length > 0) and
-                  ($checks | all(.state == "SUCCESS" or .conclusion == "SUCCESS")))
+                  ($checks | all(.state == "SUCCESS" or (.conclusion // "" | IN("SUCCESS", "NEUTRAL")))))
               )')
             if [ -n "$base_prs" ]; then
               prs="${prs}${base_prs}"$'\n'
@@ -142,7 +152,7 @@ jobs:
             echo "Checked for dependency PRs authored by swarmer-jnpacker[bot] targeting"
             echo "backplane-5.0 or backplane-2.17, on branches matching"
             echo "\`fix/{go,python}-deps-*\` or \`build/{go,python}-deps-*\` that have:"
-            echo "- All status checks passing (SUCCESS)"
+            echo "- All status checks passing (SUCCESS or non-blocking NEUTRAL)"
             echo "- Mergeable state (no conflicts)"
             echo ""
             echo "| Merged | Queued | Failed |"
