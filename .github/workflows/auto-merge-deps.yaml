@@ -3,12 +3,10 @@ name: Auto-merge Dependency Updates
 on:
   workflow_dispatch:
   schedule:
-    # Every 30 min, 13:30-17:00 UTC, Mon-Fri.
-    # Covers 9:30am-12pm ET across both EDT (UTC-4) and EST (UTC-5), since
+    # Every 30 min, 12:00-17:00 UTC, Mon-Fri.
+    # Covers 8am-1pm ET across both EDT (UTC-4) and EST (UTC-5), since
     # GitHub Actions cron is UTC-only and does not observe DST.
-    - cron: "30 13 * * 1-5" # 13:30 UTC
-    - cron: "0,30 14-16 * * 1-5" # 14:00, 14:30, 15:00, 15:30, 16:00, 16:30 UTC
-    - cron: "0 17 * * 1-5" # 17:00 UTC
+    - cron: "0,30 12-17 * * 1-5" # 12:00, 12:30, ..., 16:30, 17:00 UTC
 
 jobs:
   auto-merge:
@@ -31,11 +29,16 @@ jobs:
           # identity, targeting one of this repo's maintained release
           # branches (backplane-5.0, backplane-2.17 -- note main is not a
           # maintained release branch here since backplane-5.0 is this
-          # repo's default branch), on a dependency-update branch (created
-          # by the swarm-deps-agent bot), are eligible for auto-merge. Also
-          # require the PR to be mergeable and every non-tide check to have
-          # completed in a non-blocking state (not just "at least one
-          # success" - a pending or failed check must not count as passing).
+          # repo's default branch), are eligible for auto-merge. gh pr
+          # list's GraphQL-backed --json author renders bot logins as
+          # "app/swarmer-jnpacker" (not the "swarmer-jnpacker[bot]" form
+          # used by the REST API and web UI), so match both spellings.
+          # In addition, the PR must either be on a dependency-update
+          # branch (created by the swarm-deps-agent bot) or carry the
+          # "automated-update" label. Also require the PR to be mergeable
+          # and every non-tide check to have completed in a non-blocking
+          # state (not just "at least one success" - a pending or failed
+          # check must not count as passing).
           #
           # This repo's CI is Red Hat Konflux (reported via the GitHub
           # Checks API, not GitHub Actions), and Konflux's
@@ -49,14 +52,19 @@ jobs:
           base_branches=("backplane-5.0" "backplane-2.17")
           prs=""
           for base in "${base_branches[@]}"; do
-            base_prs=$(gh pr list --state open --base "$base" --limit 100 --json number,title,url,author,headRefName,headRefOid,statusCheckRollup,mergeable --jq '
+            base_prs=$(gh pr list --state open --base "$base" --limit 100 --json number,title,url,author,headRefName,headRefOid,statusCheckRollup,mergeable,labels --jq '
               .[] | select(
-                (.author.login == "swarmer-jnpacker[bot]") and
-                (.headRefName | test("^(fix|build)/(go|python)-deps-")) and
+                (.author.login == "swarmer-jnpacker[bot]" or .author.login == "app/swarmer-jnpacker") and
+                (
+                  (.headRefName | test("^(fix|build|deps)/(go|python)-(deps|update)-")) or
+                  (.labels // [] | any(.name == "automated-update"))
+                ) and
                 (.mergeable == "MERGEABLE") and
                 ([.statusCheckRollup[] | select(.context != "tide" and .name != "tide")] as $checks |
                   ($checks | length > 0) and
-                  ($checks | all(.state == "SUCCESS" or (.conclusion // "" | IN("SUCCESS", "NEUTRAL")))))
+                  ($checks | all(
+                    ((.state // "" | ascii_upcase) == "SUCCESS") or
+                    ((.conclusion // "" | ascii_upcase) | IN("SUCCESS", "NEUTRAL")))))
               )')
             if [ -n "$base_prs" ]; then
               prs="${prs}${base_prs}"$'\n'
@@ -104,6 +112,14 @@ jobs:
             pr_branch=$(echo "$pr_info" | jq -r '.headRefName')
             pr_head_oid=$(echo "$pr_info" | jq -r '.headRefOid')
 
+            # Note in the merge comment which eligibility path matched, so
+            # it's clear from the audit trail why the PR qualified.
+            if echo "$pr_branch" | grep -qE "^(fix|build|deps)/(go|python)-(deps|update)-"; then
+              pr_match_reason="branch: $pr_branch"
+            else
+              pr_match_reason="label: automated-update, branch: $pr_branch"
+            fi
+
             echo "Attempting to merge PR #$pr_number: $pr_title (branch: $pr_branch)"
 
             # --match-head-commit binds the merge to the exact commit that
@@ -119,12 +135,12 @@ jobs:
                 echo "Successfully merged PR #$pr_number"
                 merged_count=$((merged_count + 1))
 
-                gh pr comment "$pr_number" --body "This PR was automatically merged because all checks passed and it matched the trusted dependency update pattern (author: swarmer-jnpacker[bot], branch: $pr_branch)."
+                gh pr comment "$pr_number" --body "This PR was automatically merged because all checks passed and it matched the trusted dependency update pattern (author: swarmer-jnpacker[bot], $pr_match_reason)."
               else
                 echo "PR #$pr_number was queued for merge (state: $pr_state), not yet merged"
                 queued_count=$((queued_count + 1))
 
-                gh pr comment "$pr_number" --body "This PR passed all checks and matched the trusted dependency update pattern (author: swarmer-jnpacker[bot], branch: $pr_branch); it has been queued for merge."
+                gh pr comment "$pr_number" --body "This PR passed all checks and matched the trusted dependency update pattern (author: swarmer-jnpacker[bot], $pr_match_reason); it has been queued for merge."
               fi
             else
               echo "Failed to merge PR #$pr_number"
@@ -150,8 +166,9 @@ jobs:
             echo "## Auto-merge workflow summary"
             echo ""
             echo "Checked for dependency PRs authored by swarmer-jnpacker[bot] targeting"
-            echo "backplane-5.0 or backplane-2.17, on branches matching"
-            echo "\`fix/{go,python}-deps-*\` or \`build/{go,python}-deps-*\` that have:"
+            echo "backplane-5.0 or backplane-2.17 that either match branches like"
+            echo "\`fix/{go,python}-deps-*\`, \`build/{go,python}-deps-*\`, or"
+            echo "\`deps/{go,python}-update-*\`, or carry the \`automated-update\` label, and have:"
             echo "- All status checks passing (SUCCESS or non-blocking NEUTRAL)"
             echo "- Mergeable state (no conflicts)"
             echo ""
