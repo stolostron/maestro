@@ -2,6 +2,8 @@ module github.com/openshift-online/maestro
 
 go 1.25.12
 
+toolchain go1.26.6
+
 require (
 	cloud.google.com/go/pubsub/v2 v2.3.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.12.0
