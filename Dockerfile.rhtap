@@ -11,7 +11,7 @@ ENV GOEXPERIMENT=strictfipsruntime
 ENV CGO_ENABLED=1
 RUN make binary BUILD_OPTS="-tags strictfipsruntime -ldflags \"-X k8s.io/component-base/version.gitVersion=v0.0.0-main -X k8s.io/component-base/version.gitCommit=${GIT_COMMIT}\""
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+FROM registry.redhat.io/ubi9/ubi-minimal-pqc:latest
 
 # Pass GIT Commit to the container for maestro server
 ARG GIT_COMMIT
