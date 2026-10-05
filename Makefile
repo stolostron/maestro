@@ -174,12 +174,11 @@ verify: check-gopath verify-fmt-imports
 .PHONY: verify
 
 # Runs our linter to verify that everything is following best practices
-# Requires golangci-lint to be installed @ $(go env GOPATH)/bin/golangci-lint
-# Linter is set to ignore `unused` stuff due to example being incomplete by definition
+# Requires golangci-lint (v2, since go.mod requires go >= 1.26 which is only supported by
+# golangci-lint v2) to be installed @ $(go env GOPATH)/bin/golangci-lint
+# The curated linter set in .golangci.yml omits `unused` because examples are incomplete by definition.
 lint:
-	$(GOLANGCI_LINT_BIN) run -e unused \
-		./cmd/... \
-		./pkg/...
+	$(GOLANGCI_LINT_BIN) run ./cmd/... ./pkg/...
 .PHONY: lint
 
 # Build binaries
