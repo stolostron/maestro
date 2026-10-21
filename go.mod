@@ -2,7 +2,7 @@ module github.com/openshift-online/maestro
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.26.10
 
 require (
 	cloud.google.com/go/pubsub/v2 v2.6.1
